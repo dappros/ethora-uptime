@@ -4,6 +4,7 @@ import path from 'node:path'
 import yaml from 'js-yaml'
 
 export type CheckType = 'http' | 'wss' | 'journey'
+export type CheckSeverity = 'critical' | 'optional'
 
 export type StatusRule =
   | { type: 'status_code'; expected: number[] }
@@ -13,6 +14,11 @@ export type CheckConfig = {
   id: string
   name: string
   type: CheckType
+  // Severity affects instance status aggregation:
+  // - critical: failures can make instance red
+  // - optional: failures never make instance red (still recorded & visible)
+  severity?: CheckSeverity
+  enabled?: boolean
   intervalSeconds: number
   timeoutMs: number
   // url is required for http/wss checks; journey checks use env config and may omit url
@@ -53,8 +59,12 @@ export function loadConfigFromFile(filePath: string): UptimeConfig {
       if (!chk?.id || !chk?.name || !chk?.type) {
         throw new Error(`Check is missing required fields (id,name,type) in instance ${inst.id}`)
       }
+      if (chk.enabled === false) continue
       if (chk.type !== 'journey' && !chk?.url) {
         throw new Error(`Check is missing url (required for type=${chk.type}) in instance ${inst.id}`)
+      }
+      if (chk.severity && chk.severity !== 'critical' && chk.severity !== 'optional') {
+        throw new Error(`Check ${inst.id}:${chk.id} has invalid severity: ${chk.severity}`)
       }
     }
   }

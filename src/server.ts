@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { createDb, ensureSchema, upsertConfig } from './db.js'
 import { loadConfigFromFile } from './config.js'
 import { startScheduler } from './scheduler.js'
+import { runCheck } from './checker.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -19,11 +20,61 @@ async function main() {
   await upsertConfig(db, cfg)
 
   const scheduler = startScheduler(db, cfg)
+  const checkMap = new Map<string, any>()
+  for (const inst of cfg.instances) {
+    for (const chk of inst.checks) {
+      const id = `${inst.id}:${chk.id}`
+      checkMap.set(id, { instanceId: inst.id, ...chk })
+    }
+  }
 
   const app = express()
   app.use(express.json({ limit: '1mb' }))
 
   app.get('/health', (_req, res) => res.json({ ok: true }))
+
+  app.get('/api/history', async (req, res) => {
+    const checkId = String(req.query.checkId || '').trim()
+    const sinceMinutes = Number(req.query.sinceMinutes || 60 * 24)
+    const limit = Math.min(5000, Math.max(10, Number(req.query.limit || 1000)))
+
+    if (!checkId) return res.status(422).json({ error: 'checkId is required' })
+    const rows = await db.pool.query(
+      `select ts, ok, status_code, duration_ms, error_text
+       from check_runs
+       where check_id = $1
+         and ts >= now() - ($2 || ' minutes')::interval
+       order by ts asc
+       limit $3`,
+      [checkId, String(sinceMinutes), limit]
+    )
+    return res.json({ checkId, points: rows.rows })
+  })
+
+  app.post('/api/run-check', async (req, res) => {
+    const checkId = String(req.body?.checkId || '').trim()
+    if (!checkId) return res.status(422).json({ error: 'checkId is required' })
+
+    const chk = checkMap.get(checkId)
+    if (!chk) return res.status(404).json({ error: 'check not found' })
+    if (chk.enabled === false) return res.status(422).json({ error: 'check is disabled' })
+
+    const startedAt = Date.now()
+    const run = await runCheck(chk)
+    await db.pool.query(
+      `insert into check_runs(check_id, ok, status_code, duration_ms, error_text, details)
+       values($1,$2,$3,$4,$5,$6)`,
+      [
+        checkId,
+        Boolean(run.ok),
+        run.statusCode ?? null,
+        run.durationMs || (Date.now() - startedAt),
+        run.errorText ?? null,
+        JSON.stringify(run.details || {}),
+      ]
+    )
+    return res.json({ checkId, run })
+  })
 
   app.get('/api/summary', async (_req, res) => {
     const instances = await db.pool.query(
@@ -33,7 +84,7 @@ async function main() {
 
     for (const inst of instances.rows) {
       const checks = await db.pool.query(
-        `select c.id, c.name
+        `select c.id, c.name, c.type, c.meta
          from checks c
          where c.instance_id = $1
          order by c.id asc`,
@@ -45,6 +96,9 @@ async function main() {
       let hasWarn = false
 
       for (const chk of checks.rows) {
+        const meta = typeof chk?.meta === 'string' ? (() => { try { return JSON.parse(chk.meta) } catch { return {} } })() : (chk?.meta || {})
+        const severity = meta?.severity || 'critical'
+        const isOptional = severity === 'optional'
         const last = await db.pool.query(
           `select ok, status_code, duration_ms, ts, error_text
            from check_runs
@@ -56,13 +110,15 @@ async function main() {
 
         const row = last.rows[0]
         if (!row) {
-          hasWarn = true
-          checkOut.push({ id: chk.id, name: chk.name, ok: false, statusCode: null, durationMs: null })
+          // No data yet -> warn, but never hard-fail instance
+          if (!isOptional) hasWarn = true
+          checkOut.push({ id: chk.id, name: chk.name, severity, ok: false, statusCode: null, durationMs: null, errorText: 'no data yet' })
           continue
         }
         if (!row.ok) {
-          // Special case: journey is opt-in; missing env should not make the whole instance red.
-          if (typeof row.error_text === 'string' && row.error_text.startsWith('skipped:')) {
+          if (isOptional) {
+            // Optional checks never affect instance status.
+          } else if (typeof row.error_text === 'string' && row.error_text.startsWith('skipped:')) {
             hasWarn = true
           } else {
             hasFail = true
@@ -71,10 +127,13 @@ async function main() {
         checkOut.push({
           id: chk.id,
           name: chk.name,
+          type: chk.type,
+          severity,
           ok: Boolean(row.ok),
           statusCode: row.status_code ?? null,
           durationMs: row.duration_ms ?? null,
           ts: row.ts,
+          errorText: row.error_text ?? null,
         })
       }
 

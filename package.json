@@ -13,6 +13,7 @@
     "build": "tsc -p tsconfig.json && cp -R src/public dist/public",
     "start": "node dist/server.js",
     "journey": "tsx src/journey.ts",
+    "run-once": "tsx src/runOnce.ts",
     "lint": "echo \"(no linter configured)\""
   },
   "dependencies": {

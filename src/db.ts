@@ -89,6 +89,8 @@ export async function upsertConfig(db: Db, config: any) {
             headers: chk.headers || {},
             body: chk.body || undefined,
             expect: chk.expect || [],
+            severity: chk.severity || (chk.type === 'journey' ? 'optional' : 'critical'),
+            enabled: chk.enabled !== false,
           }),
         ]
       )

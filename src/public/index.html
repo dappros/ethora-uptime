@@ -56,6 +56,8 @@
         for (const inst of data.instances) {
           const card = document.createElement('div');
           card.className = 'card';
+          const critical = inst.checks.filter(c => (c.severity || 'critical') === 'critical');
+          const optional = inst.checks.filter(c => (c.severity || 'critical') !== 'critical');
           card.innerHTML = `
             <div style="display:flex;justify-content:space-between;gap:8px;">
               <div>
@@ -67,19 +69,56 @@
             <table>
               <thead><tr><th>Check</th><th>Last</th><th>ms</th></tr></thead>
               <tbody>
-                ${inst.checks.map(c => `
+                ${critical.map(c => `
                   <tr>
-                    <td>${c.name}</td>
-                    <td>${c.ok ? 'OK' : 'FAIL'}${c.statusCode ? ' ('+c.statusCode+')' : ''}</td>
+                    <td><a href="/history.html#${encodeURIComponent(c.id)}">${c.name}</a></td>
+                    <td>${c.ok ? 'OK' : ('FAIL' + (c.errorText ? ' ('+c.errorText+')' : ''))}${c.statusCode ? ' ('+c.statusCode+')' : ''}</td>
                     <td>${c.durationMs ?? ''}</td>
                   </tr>
                 `).join('')}
               </tbody>
             </table>
+            ${optional.length ? `
+              <details style="margin-top:10px;">
+                <summary class="muted">Optional checks (${optional.length})</summary>
+                <table>
+                  <thead><tr><th>Check</th><th>Last</th><th>ms</th><th></th></tr></thead>
+                  <tbody>
+                    ${optional.map(c => `
+                      <tr>
+                        <td><a href="/history.html#${encodeURIComponent(c.id)}">${c.name}</a></td>
+                        <td>${c.ok ? 'OK' : ('FAIL' + (c.errorText ? ' ('+c.errorText+')' : ''))}${c.statusCode ? ' ('+c.statusCode+')' : ''}</td>
+                        <td>${c.durationMs ?? ''}</td>
+                        <td>${c.type === 'journey' ? `<button data-run="${c.id}">Run</button>` : ''}</td>
+                      </tr>
+                    `).join('')}
+                  </tbody>
+                </table>
+              </details>
+            ` : ''}
           `;
           grid.appendChild(card);
         }
         updatedAt.textContent = 'Updated: ' + new Date().toLocaleTimeString();
+
+        // Wire \"Run\" buttons (journey)
+        document.querySelectorAll('button[data-run]').forEach((btn) => {
+          btn.addEventListener('click', async (e) => {
+            const checkId = e.currentTarget.getAttribute('data-run');
+            if (!checkId) return;
+            e.currentTarget.disabled = true;
+            try {
+              await fetch('/api/run-check', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ checkId }),
+              });
+            } finally {
+              e.currentTarget.disabled = false;
+              load().catch(() => {});
+            }
+          });
+        });
       }
 
       refreshBtn.addEventListener('click', () => load().catch(console.error));

@@ -13,6 +13,7 @@ export function startScheduler(db: Db, cfg: UptimeConfig): Scheduler {
   for (const inst of cfg.instances) {
     if (!inst.enabled) continue
     for (const chk of inst.checks) {
+      if (chk.enabled === false) continue
       const checkId = `${inst.id}:${chk.id}`
       const intervalMs = Math.max(5, Number(chk.intervalSeconds || 60)) * 1000
 

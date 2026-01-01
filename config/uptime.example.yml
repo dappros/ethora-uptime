@@ -46,6 +46,7 @@ instances:
       - id: journey
         name: Synthetic_journey
         type: journey
+        severity: optional
         intervalSeconds: 3600
         timeoutMs: 180000
 

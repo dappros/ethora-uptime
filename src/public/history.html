@@ -1,0 +1,135 @@
+<!doctype html>
+<!-- Ethora.com platform, copyright: Dappros Ltd (c) 2026, all rights reserved -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ethora Uptime - History</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { font-family: ui-sans-serif, system-ui, Arial; margin: 0; padding: 16px; }
+      .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+      .muted { opacity: 0.7; font-size: 12px; }
+      canvas { width: 100%; height: 240px; border: 1px solid rgba(127,127,127,0.35); border-radius: 10px; }
+      select, button { padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(127,127,127,0.35); background: transparent; }
+      a { color: inherit; }
+    </style>
+  </head>
+  <body>
+    <div class="row">
+      <div style="font-size:18px;font-weight:700;">History</div>
+      <div class="muted">CheckId: <span id="checkId"></span></div>
+      <div style="flex:1;"></div>
+      <label class="muted">Window</label>
+      <select id="windowSel">
+        <option value="60">1h</option>
+        <option value="360">6h</option>
+        <option value="1440" selected>24h</option>
+        <option value="10080">7d</option>
+      </select>
+      <button id="backBtn">Back</button>
+    </div>
+
+    <p class="muted">Green = OK, Red = FAIL. Line shows response time (ms). Gaps mean no data.</p>
+    <canvas id="chart" width="1200" height="260"></canvas>
+    <pre id="stats" class="muted"></pre>
+
+    <script>
+      const checkIdEl = document.getElementById('checkId');
+      const canvas = document.getElementById('chart');
+      const ctx = canvas.getContext('2d');
+      const statsEl = document.getElementById('stats');
+      const windowSel = document.getElementById('windowSel');
+      document.getElementById('backBtn').addEventListener('click', () => history.back());
+
+      function getCheckId() {
+        return decodeURIComponent((location.hash || '').replace(/^#/, ''));
+      }
+
+      function clear() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+
+      function draw(points) {
+        clear();
+        if (!points.length) {
+          ctx.fillText('No data', 20, 40);
+          return;
+        }
+
+        const xs = points.map(p => new Date(p.ts).getTime());
+        const ys = points.map(p => p.duration_ms || 0);
+        const minX = Math.min(...xs);
+        const maxX = Math.max(...xs);
+        const maxY = Math.max(10, ...ys);
+
+        const padL = 40, padR = 10, padT = 10, padB = 20;
+        const w = canvas.width - padL - padR;
+        const h = canvas.height - padT - padB;
+
+        const xOf = (t) => padL + (w * (t - minX) / (maxX - minX || 1));
+        const yOf = (v) => padT + (h - (h * v / maxY));
+
+        // axes
+        ctx.strokeStyle = 'rgba(127,127,127,0.5)';
+        ctx.beginPath();
+        ctx.moveTo(padL, padT);
+        ctx.lineTo(padL, padT + h);
+        ctx.lineTo(padL + w, padT + h);
+        ctx.stroke();
+
+        // line
+        ctx.strokeStyle = 'rgba(52,152,219,0.9)';
+        ctx.beginPath();
+        points.forEach((p, i) => {
+          const x = xOf(new Date(p.ts).getTime());
+          const y = yOf(p.duration_ms || 0);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+
+        // markers
+        points.forEach((p) => {
+          const x = xOf(new Date(p.ts).getTime());
+          const y = yOf(p.duration_ms || 0);
+          ctx.fillStyle = p.ok ? 'rgba(46,204,113,0.9)' : 'rgba(231,76,60,0.9)';
+          ctx.beginPath();
+          ctx.arc(x, y, 3, 0, Math.PI * 2);
+          ctx.fill();
+        });
+
+        // labels
+        ctx.fillStyle = 'rgba(127,127,127,0.9)';
+        ctx.fillText('ms', 6, 12);
+        ctx.fillText(String(maxY), 6, padT + 10);
+        ctx.fillText('0', 12, padT + h);
+      }
+
+      async function load() {
+        const checkId = getCheckId();
+        checkIdEl.textContent = checkId || '(none)';
+        const sinceMinutes = Number(windowSel.value || 1440);
+        if (!checkId) return;
+        const r = await fetch(`/api/history?checkId=${encodeURIComponent(checkId)}&sinceMinutes=${sinceMinutes}`);
+        const data = await r.json();
+        const pts = data.points || [];
+        draw(pts);
+
+        const okCount = pts.filter(p => p.ok).length;
+        const failCount = pts.length - okCount;
+        const p95 = (() => {
+          const arr = pts.map(p => p.duration_ms || 0).sort((a,b)=>a-b);
+          if (!arr.length) return 0;
+          return arr[Math.floor(arr.length * 0.95)];
+        })();
+        statsEl.textContent = `points=${pts.length} ok=${okCount} fail=${failCount} p95_ms=${p95}`;
+      }
+
+      windowSel.addEventListener('change', () => load().catch(console.error));
+      load().catch(console.error);
+    </script>
+  </body>
+</html>
+
+
