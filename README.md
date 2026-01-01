@@ -45,6 +45,14 @@ The service reads a YAML config file (mounted into the container):
 - Default path in Docker: `/config/uptime.yml`
 - Example file: `config/uptime.example.yml`
 
+### Manual-only checks
+
+If you want a check to **not** be scheduled, set:
+
+- `enabled: false`
+
+You can still run it from the UI “Run” button (or via `POST /api/run-check`).
+
 ## Running modes
 
 ### Always-on (recommended)

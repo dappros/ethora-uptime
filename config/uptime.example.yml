@@ -47,6 +47,7 @@ instances:
         name: Synthetic_journey
         type: journey
         severity: optional
+        enabled: false
         intervalSeconds: 3600
         timeoutMs: 180000
 

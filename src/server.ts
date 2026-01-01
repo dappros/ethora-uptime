@@ -57,7 +57,7 @@ async function main() {
 
     const chk = checkMap.get(checkId)
     if (!chk) return res.status(404).json({ error: 'check not found' })
-    if (chk.enabled === false) return res.status(422).json({ error: 'check is disabled' })
+    // NOTE: disabled checks are not scheduled, but can still be run manually via this endpoint.
 
     const startedAt = Date.now()
     const run = await runCheck(chk)
