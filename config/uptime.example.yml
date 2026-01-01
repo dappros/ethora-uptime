@@ -42,4 +42,11 @@ instances:
         intervalSeconds: 60
         timeoutMs: 6000
 
+      # Optional: synthetic regression test (disabled unless ETHORA_* env vars are set in the uptime container)
+      - id: journey
+        name: Synthetic_journey
+        type: journey
+        intervalSeconds: 3600
+        timeoutMs: 180000
+
 

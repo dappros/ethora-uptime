@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import yaml from 'js-yaml'
 
-export type CheckType = 'http' | 'wss'
+export type CheckType = 'http' | 'wss' | 'journey'
 
 export type StatusRule =
   | { type: 'status_code'; expected: number[] }
@@ -15,7 +15,8 @@ export type CheckConfig = {
   type: CheckType
   intervalSeconds: number
   timeoutMs: number
-  url: string
+  // url is required for http/wss checks; journey checks use env config and may omit url
+  url?: string
   method?: 'GET' | 'POST'
   headers?: Record<string, string>
   body?: string
@@ -49,8 +50,11 @@ export function loadConfigFromFile(filePath: string): UptimeConfig {
     if (!inst?.id || !inst?.name) throw new Error('Each instance must have id + name')
     if (!Array.isArray(inst.checks)) throw new Error(`Instance ${inst.id} must have checks[]`)
     for (const chk of inst.checks) {
-      if (!chk?.id || !chk?.name || !chk?.type || !chk?.url) {
-        throw new Error(`Check is missing required fields (id,name,type,url) in instance ${inst.id}`)
+      if (!chk?.id || !chk?.name || !chk?.type) {
+        throw new Error(`Check is missing required fields (id,name,type) in instance ${inst.id}`)
+      }
+      if (chk.type !== 'journey' && !chk?.url) {
+        throw new Error(`Check is missing url (required for type=${chk.type}) in instance ${inst.id}`)
       }
     }
   }

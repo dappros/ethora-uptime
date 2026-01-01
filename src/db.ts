@@ -81,7 +81,7 @@ export async function upsertConfig(db: Db, config: any) {
           inst.id,
           chk.name,
           chk.type,
-          chk.url,
+          chk.url || '',
           Number(chk.intervalSeconds || 60),
           Number(chk.timeoutMs || 5000),
           JSON.stringify({

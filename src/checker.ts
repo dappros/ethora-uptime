@@ -1,6 +1,7 @@
 // Ethora.com platform, copyright: Dappros Ltd (c) 2026, all rights reserved
 import { WebSocket } from 'ws'
 import type { CheckConfig } from './config.js'
+import { getJourneyEnvFromProcess, runJourney } from './journeyRunner.js'
 
 export type CheckRunResult = {
   ok: boolean
@@ -21,10 +22,16 @@ export async function runCheck(check: CheckConfig): Promise<CheckRunResult> {
   if (check.type === 'wss') {
     return await runWssCheck(check)
   }
+  if (check.type === 'journey') {
+    return await runJourneyCheck(check)
+  }
   return { ok: false, durationMs: 0, errorText: `Unknown check type: ${(check as any).type}` }
 }
 
 async function runHttpCheck(check: CheckConfig): Promise<CheckRunResult> {
+  if (!check.url) {
+    return { ok: false, durationMs: 0, errorText: 'missing url for http check' }
+  }
   const start = nowMs()
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), check.timeoutMs)
@@ -72,6 +79,10 @@ async function runHttpCheck(check: CheckConfig): Promise<CheckRunResult> {
 }
 
 async function runWssCheck(check: CheckConfig): Promise<CheckRunResult> {
+  if (!check.url) {
+    return { ok: false, durationMs: 0, errorText: 'missing url for wss check' }
+  }
+  const url = check.url
   const start = nowMs()
   const timeoutMs = check.timeoutMs
 
@@ -90,7 +101,7 @@ async function runWssCheck(check: CheckConfig): Promise<CheckRunResult> {
       finish({ ok: false, durationMs: nowMs() - start, errorText: 'timeout' })
     }, timeoutMs)
 
-    const ws = new WebSocket(check.url, {
+    const ws = new WebSocket(url, {
       headers: check.headers,
     })
 
@@ -107,6 +118,23 @@ async function runWssCheck(check: CheckConfig): Promise<CheckRunResult> {
       finish({ ok: false, durationMs: nowMs() - start, errorText: err?.message || String(err) })
     })
   })
+}
+
+async function runJourneyCheck(check: CheckConfig): Promise<CheckRunResult> {
+  const start = nowMs()
+  // Allow per-check timeout (best-effort)
+  const timeoutMs = Math.max(1000, Number(check.timeoutMs || 60000))
+  try {
+    const res = await Promise.race([
+      runJourney(getJourneyEnvFromProcess()),
+      new Promise<{ ok: boolean; details: any }>((_resolve, reject) =>
+        setTimeout(() => reject(new Error('timeout')), timeoutMs)
+      ),
+    ])
+    return { ok: Boolean(res.ok), durationMs: nowMs() - start, details: res.details }
+  } catch (e: any) {
+    return { ok: false, durationMs: nowMs() - start, errorText: e?.message || String(e) }
+  }
 }
 
 function getJsonPath(obj: any, path: string): any {
