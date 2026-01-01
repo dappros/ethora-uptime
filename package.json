@@ -14,6 +14,7 @@
     "start": "node dist/server.js",
     "journey": "tsx src/journey.ts",
     "run-once": "tsx src/runOnce.ts",
+    "run-once:dist": "node dist/runOnce.js",
     "lint": "echo \"(no linter configured)\""
   },
   "dependencies": {
