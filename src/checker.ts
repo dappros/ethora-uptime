@@ -133,6 +133,10 @@ async function runJourneyCheck(check: CheckConfig): Promise<CheckRunResult> {
     ])
     return { ok: Boolean(res.ok), durationMs: nowMs() - start, details: res.details }
   } catch (e: any) {
+    // If journey isn't configured, treat it as "skipped" (WARN), not a hard FAIL.
+    if (String(e?.message || '').startsWith('Missing env:')) {
+      return { ok: false, durationMs: nowMs() - start, errorText: `skipped: ${e.message}` }
+    }
     return { ok: false, durationMs: nowMs() - start, errorText: e?.message || String(e) }
   }
 }

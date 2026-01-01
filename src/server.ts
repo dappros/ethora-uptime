@@ -46,7 +46,7 @@ async function main() {
 
       for (const chk of checks.rows) {
         const last = await db.pool.query(
-          `select ok, status_code, duration_ms, ts
+          `select ok, status_code, duration_ms, ts, error_text
            from check_runs
            where check_id = $1
            order by ts desc
@@ -60,7 +60,14 @@ async function main() {
           checkOut.push({ id: chk.id, name: chk.name, ok: false, statusCode: null, durationMs: null })
           continue
         }
-        if (!row.ok) hasFail = true
+        if (!row.ok) {
+          // Special case: journey is opt-in; missing env should not make the whole instance red.
+          if (typeof row.error_text === 'string' && row.error_text.startsWith('skipped:')) {
+            hasWarn = true
+          } else {
+            hasFail = true
+          }
+        }
         checkOut.push({
           id: chk.id,
           name: chk.name,

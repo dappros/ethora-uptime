@@ -8,7 +8,7 @@ instances:
       - id: api_ping
         name: API_ping
         type: http
-        url: "http://127.0.0.1:8080/ping"
+        url: "http://host.docker.internal:8080/ping"
         intervalSeconds: 30
         timeoutMs: 4000
         expect:
@@ -17,7 +17,7 @@ instances:
       - id: swagger_json
         name: Swagger_JSON
         type: http
-        url: "http://127.0.0.1:8080/api-docs/swagger.json"
+        url: "http://host.docker.internal:8080/api-docs/swagger.json"
         intervalSeconds: 60
         timeoutMs: 6000
         expect:
@@ -29,7 +29,7 @@ instances:
       - id: minio_live
         name: MinIO_live
         type: http
-        url: "http://127.0.0.1:9000/minio/health/live"
+        url: "http://host.docker.internal:9000/minio/health/live"
         intervalSeconds: 30
         timeoutMs: 3000
         expect:

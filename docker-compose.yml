@@ -22,6 +22,9 @@ services:
       PORT: 8099
       DATABASE_URL: postgresql://uptime:uptime@db:5432/uptime
       UPTIME_CONFIG: /config/uptime.yml
+    # Linux: make host.docker.internal resolve to the Docker host (so checks can hit host ports like 8080/9000)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8099:8099"
     volumes:
