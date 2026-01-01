@@ -1,0 +1,7 @@
+# Ethora.com platform, copyright: Dappros Ltd (c) 2026, all rights reserved
+node_modules/
+dist/
+.env
+.env.*
+*.log
+.DS_Store

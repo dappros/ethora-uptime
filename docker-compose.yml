@@ -1,0 +1,36 @@
+## Ethora.com platform, copyright: Dappros Ltd (c) 2026, all rights reserved
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: uptime
+      POSTGRES_PASSWORD: uptime
+      POSTGRES_DB: uptime
+    ports:
+      - "5433:5432"
+    volumes:
+      - uptime_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U uptime -d uptime"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build: .
+    environment:
+      PORT: 8099
+      DATABASE_URL: postgresql://uptime:uptime@db:5432/uptime
+      UPTIME_CONFIG: /config/uptime.yml
+    ports:
+      - "8099:8099"
+    volumes:
+      - ./config/uptime.example.yml:/config/uptime.yml:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  uptime_pgdata:
+
+
