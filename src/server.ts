@@ -101,7 +101,7 @@ async function main() {
         const severity = meta?.severity || 'critical'
         const isOptional = severity === 'optional'
         const last = await db.pool.query(
-          `select ok, status_code, duration_ms, ts, error_text
+          `select ok, status_code, duration_ms, ts, error_text, details
            from check_runs
            where check_id = $1
            order by ts desc
