@@ -138,9 +138,19 @@ async function main() {
           captures: row.details?.captures || undefined,
         })
 
-        // Prefer build info from API_ping check (if configured with capture rules)
-        if (!buildInfo && chk.name === 'API_ping' && row.details?.captures) {
-          buildInfo = row.details.captures
+        // Prefer build info from API_ping check (if configured with capture rules),
+        // but allow other checks (e.g. Swagger_JSON) to fill missing fields.
+        if (row.details?.captures) {
+          if (!buildInfo) {
+            buildInfo = row.details.captures
+          } else {
+            for (const [k, v] of Object.entries(row.details.captures)) {
+              // Fill only if we don't have it already
+              if (buildInfo[k] === undefined || buildInfo[k] === null) {
+                buildInfo[k] = v
+              }
+            }
+          }
         }
       }
 
