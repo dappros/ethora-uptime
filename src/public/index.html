@@ -60,7 +60,8 @@
           const optional = inst.checks.filter(c => (c.severity || 'critical') !== 'critical');
           const buildLine = inst.build
             ? [
-                inst.build.version ? `v${inst.build.version}` : null,
+                // Prefer date-based buildVersion (yy.mm.dd) if present; fallback to semantic version.
+                inst.build.buildVersion ? `v${inst.build.buildVersion}` : (inst.build.version ? `v${inst.build.version}` : null),
                 inst.build.commit ? `commit ${String(inst.build.commit).slice(0, 12)}` : null,
                 inst.build.time ? `${inst.build.time}` : null,
               ].filter(Boolean).join(' · ')
