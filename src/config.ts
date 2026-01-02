@@ -8,7 +8,7 @@ export type CheckSeverity = 'critical' | 'optional'
 
 export type StatusRule =
   | { type: 'status_code'; expected: number[] }
-  | { type: 'json'; path: string; equals?: string; exists?: boolean }
+  | { type: 'json'; path: string; equals?: string; exists?: boolean; captureAs?: string }
 
 export type CheckConfig = {
   id: string

@@ -58,11 +58,19 @@
           card.className = 'card';
           const critical = inst.checks.filter(c => (c.severity || 'critical') === 'critical');
           const optional = inst.checks.filter(c => (c.severity || 'critical') !== 'critical');
+          const buildLine = inst.build
+            ? [
+                inst.build.version ? `v${inst.build.version}` : null,
+                inst.build.commit ? `commit ${String(inst.build.commit).slice(0, 12)}` : null,
+                inst.build.time ? `${inst.build.time}` : null,
+              ].filter(Boolean).join(' · ')
+            : '';
           card.innerHTML = `
             <div style="display:flex;justify-content:space-between;gap:8px;">
               <div>
                 <div style="font-weight:700;">${inst.name}</div>
                 <div class="muted">${inst.id}</div>
+                ${buildLine ? `<div class="muted">${buildLine}</div>` : ``}
               </div>
               <div class="status"><span class="dot ${statusToClass(inst.status)}"></span>${inst.status.toUpperCase()}</div>
             </div>

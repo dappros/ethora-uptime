@@ -50,21 +50,38 @@ async function runHttpCheck(check: CheckConfig): Promise<CheckRunResult> {
     const details: Record<string, any> = {}
 
     const expect = check.expect || []
+    const jsonRules = expect.filter((r) => r.type === 'json')
+    let parsedJson: any = undefined
+    let jsonParsedOk = false
+    if (jsonRules.length) {
+      const text = await resp.clone().text()
+      try {
+        parsedJson = JSON.parse(text)
+        jsonParsedOk = true
+      } catch {
+        jsonParsedOk = false
+        parsedJson = undefined
+      }
+    }
+
     for (const rule of expect) {
       if (rule.type === 'status_code') {
         ok = ok && rule.expected.includes(statusCode)
         details.statusExpected = rule.expected
       } else if (rule.type === 'json') {
-        const text = await resp.clone().text()
-        try {
-          const json = JSON.parse(text)
-          const value = getJsonPath(json, rule.path)
-          if (rule.exists) ok = ok && value !== undefined && value !== null
-          if (rule.equals !== undefined) ok = ok && String(value) === rule.equals
-          details.jsonPath = rule.path
-        } catch {
-          ok = false
+        if (!jsonParsedOk) {
+          // Only fail the check if the rule is asserting something.
+          // If it's a capture-only rule (captureAs) we don't fail.
+          if (rule.exists || rule.equals !== undefined) ok = false
           details.jsonParse = 'failed'
+          continue
+        }
+        const value = getJsonPath(parsedJson, rule.path)
+        if (rule.exists) ok = ok && value !== undefined && value !== null
+        if (rule.equals !== undefined) ok = ok && String(value) === rule.equals
+        if (rule.captureAs && typeof rule.captureAs === 'string') {
+          details.captures = details.captures || {}
+          details.captures[rule.captureAs] = value ?? null
         }
       }
     }

@@ -94,6 +94,7 @@ async function main() {
       const checkOut = []
       let hasFail = false
       let hasWarn = false
+      let buildInfo: any = null
 
       for (const chk of checks.rows) {
         const meta = typeof chk?.meta === 'string' ? (() => { try { return JSON.parse(chk.meta) } catch { return {} } })() : (chk?.meta || {})
@@ -134,7 +135,13 @@ async function main() {
           durationMs: row.duration_ms ?? null,
           ts: row.ts,
           errorText: row.error_text ?? null,
+          captures: row.details?.captures || undefined,
         })
+
+        // Prefer build info from API_ping check (if configured with capture rules)
+        if (!buildInfo && chk.name === 'API_ping' && row.details?.captures) {
+          buildInfo = row.details.captures
+        }
       }
 
       const status = hasFail ? 'red' : hasWarn ? 'amber' : 'green'
@@ -144,6 +151,7 @@ async function main() {
         enabled: inst.enabled,
         tags: inst.tags,
         status,
+        build: buildInfo,
         checks: checkOut,
       })
     }

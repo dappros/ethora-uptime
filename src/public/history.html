@@ -32,12 +32,14 @@
 
     <p class="muted">Green = OK, Red = FAIL. Line shows response time (ms). Gaps mean no data.</p>
     <canvas id="chart" width="1200" height="260"></canvas>
+    <div id="tooltip" class="muted" style="position:fixed;display:none;pointer-events:none;padding:6px 8px;border:1px solid rgba(127,127,127,0.35);border-radius:8px;background:rgba(0,0,0,0.65);color:#fff;max-width:360px;z-index:9999;"></div>
     <pre id="stats" class="muted"></pre>
 
     <script>
       const checkIdEl = document.getElementById('checkId');
       const canvas = document.getElementById('chart');
       const ctx = canvas.getContext('2d');
+      const tooltip = document.getElementById('tooltip');
       const statsEl = document.getElementById('stats');
       const windowSel = document.getElementById('windowSel');
       document.getElementById('backBtn').addEventListener('click', () => history.back());
@@ -50,10 +52,13 @@
         ctx.clearRect(0, 0, canvas.width, canvas.height);
       }
 
+      let lastDrawState = null; // { points, xOf, yOf, padL, padT, w, h, minX, maxX, maxY }
+
       function draw(points) {
         clear();
         if (!points.length) {
           ctx.fillText('No data', 20, 40);
+          lastDrawState = null;
           return;
         }
 
@@ -104,7 +109,58 @@
         ctx.fillText('ms', 6, 12);
         ctx.fillText(String(maxY), 6, padT + 10);
         ctx.fillText('0', 12, padT + h);
+
+        // x-axis time labels (start/end)
+        const fmt = (t) => new Date(t).toLocaleString();
+        ctx.fillText(fmt(minX), padL, padT + h + 16);
+        const endLabel = fmt(maxX);
+        const endW = ctx.measureText(endLabel).width;
+        ctx.fillText(endLabel, padL + w - endW, padT + h + 16);
+
+        lastDrawState = { points, xOf, yOf, padL, padT, w, h, minX, maxX, maxY };
       }
+
+      function hideTooltip() {
+        tooltip.style.display = 'none';
+      }
+
+      function showTooltip(x, y, html) {
+        tooltip.innerHTML = html;
+        tooltip.style.left = (x + 12) + 'px';
+        tooltip.style.top = (y + 12) + 'px';
+        tooltip.style.display = 'block';
+      }
+
+      function nearestPoint(points, xPx, xOf) {
+        if (!points.length) return null;
+        let best = null;
+        let bestDist = Infinity;
+        for (const p of points) {
+          const x = xOf(new Date(p.ts).getTime());
+          const d = Math.abs(x - xPx);
+          if (d < bestDist) { bestDist = d; best = p; }
+        }
+        return { p: best, dist: bestDist };
+      }
+
+      canvas.addEventListener('mouseleave', () => hideTooltip());
+      canvas.addEventListener('mousemove', (e) => {
+        if (!lastDrawState) return;
+        const rect = canvas.getBoundingClientRect();
+        const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+        const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+
+        const { points, xOf } = lastDrawState;
+        const np = nearestPoint(points, x, xOf);
+        if (!np || !np.p) return hideTooltip();
+        if (np.dist > 10) return hideTooltip();
+
+        const p = np.p;
+        const ts = new Date(p.ts).toLocaleString();
+        const ms = p.duration_ms ?? '';
+        const status = p.ok ? 'OK' : 'FAIL';
+        showTooltip(e.clientX, e.clientY, `<div><b>${status}</b> · ${ms} ms</div><div>${ts}</div>`);
+      });
 
       async function load() {
         const checkId = getCheckId();
