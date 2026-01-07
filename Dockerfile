@@ -7,7 +7,10 @@
 FROM node:20-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm config set fund false \
+# Use BuildKit cache for faster repeated builds (keeps npm tarballs between builds).
+# NOTE: requires BuildKit (default on modern Docker). If BuildKit is off, this still works without caching.
+RUN --mount=type=cache,target=/root/.npm \
+    npm config set fund false \
  && npm config set audit false \
  && npm config set fetch-retries 6 \
  && npm config set fetch-retry-mintimeout 20000 \
