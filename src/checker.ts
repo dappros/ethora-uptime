@@ -4,6 +4,8 @@ import type { CheckConfig } from './config.js'
 import { getJourneyEnvFromProcess, runJourney } from './journeyRunner.js'
 import crypto from 'node:crypto'
 import { client as xmppClient, xml } from '@xmpp/client'
+import http from 'node:http'
+import https from 'node:https'
 
 export type CheckRunResult = {
   ok: boolean
@@ -175,33 +177,58 @@ function basicAuthHeader(user: string, pass: string): string {
 }
 
 async function ejabberdPostJson(apiUrl: string, httpHost: string, admin: string, adminPassword: string, path: string, body: any, timeoutMs: number) {
-  const controller = new AbortController()
-  const t = setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    const resp = await fetch(`${apiUrl}${path}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        // Ejabberd routes some HTTP modules by virtual host derived from the HTTP Host header.
-        // When we call ejabberd via Docker DNS (e.g. http://xmpp:5280/api), Host would be "xmpp",
-        // which may not be configured. Force the real XMPP virtual host (usually "localhost").
-        ...(httpHost ? { Host: httpHost } : {}),
-        Authorization: basicAuthHeader(admin, adminPassword),
+  // NOTE:
+  // Node's built-in fetch (undici) forbids setting the 'Host' header (it gets silently ignored),
+  // but ejabberd routes mod_http_api by the HTTP Host header. So we must use node:http(s) here.
+  return await new Promise<{ ok: boolean; status: number; data: any }>((resolve) => {
+    const url = new URL(`${apiUrl}${path}`)
+    const isHttps = url.protocol === 'https:'
+    const lib = isHttps ? https : http
+
+    const payload = JSON.stringify(body || {})
+
+    const req = lib.request(
+      {
+        method: 'POST',
+        hostname: url.hostname,
+        port: url.port ? Number(url.port) : (isHttps ? 443 : 80),
+        path: url.pathname + (url.search || ''),
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+          // Force ejabberd vhost routing when calling via Docker DNS (xmpp:5280).
+          ...(httpHost ? { Host: httpHost } : {}),
+          Authorization: basicAuthHeader(admin, adminPassword),
+        },
+        timeout: timeoutMs,
       },
-      body: JSON.stringify(body || {}),
-      signal: controller.signal,
+      (resp) => {
+        let raw = ''
+        resp.on('data', (chunk) => {
+          raw += String(chunk || '')
+        })
+        resp.on('end', () => {
+          let parsed: any = undefined
+          try {
+            parsed = raw ? JSON.parse(raw) : undefined
+          } catch {
+            parsed = raw
+          }
+          resolve({ ok: Boolean(resp.statusCode && resp.statusCode >= 200 && resp.statusCode < 300), status: resp.statusCode || 0, data: parsed })
+        })
+      }
+    )
+
+    req.on('timeout', () => {
+      try { req.destroy(new Error('timeout')) } catch {}
     })
-    const text = await resp.text()
-    let parsed: any = undefined
-    try {
-      parsed = text ? JSON.parse(text) : undefined
-    } catch {
-      parsed = text
-    }
-    return { ok: resp.ok, status: resp.status, data: parsed }
-  } finally {
-    clearTimeout(t)
-  }
+    req.on('error', (e: any) => {
+      resolve({ ok: false, status: 0, data: e?.message || String(e) })
+    })
+
+    req.write(payload)
+    req.end()
+  })
 }
 
 function derivePassword(seed: string, tag: string): string {
@@ -303,23 +330,23 @@ async function runXmppMucEchoCheck(check: CheckConfig): Promise<CheckRunResult> 
     await ejabberdPostJson(apiUrl, xmppHost, admin, adminPassword, '/register', { host: xmppHost, user: user1, password: pass1 }, Math.min(6000, timeoutMs))
     await ejabberdPostJson(apiUrl, xmppHost, admin, adminPassword, '/register', { host: xmppHost, user: user2, password: pass2 }, Math.min(6000, timeoutMs))
 
-    // Ensure room exists with explicit affiliations (owner=user1, member=user2) so it's not public.
+    // Ensure room exists.
+    //
+    // IMPORTANT (2026-01):
+    // We do NOT use ejabberd HTTP API `create_room_with_opts` here because it can return a generic
+    // `{error,"Database error"}` depending on ejabberd internals/module versions.
+    //
+    // Instead we create the room the same way the backend does: join it as the admin XMPP user.
+    // This respects our product policy (clients cannot create rooms by joining; only admin can).
     await ejabberdPostJson(apiUrl, xmppHost, admin, adminPassword, '/destroy_room', { name: roomName, service: mucService }, Math.min(8000, timeoutMs))
-    const createRes = await ejabberdPostJson(apiUrl, xmppHost, admin, adminPassword, '/create_room_with_opts', {
-      name: roomName,
-      service: mucService,
-      host: xmppHost,
-      options: [
-        { name: 'members_only', value: 'true' },
-        { name: 'persistent', value: 'true' },
-        { name: 'affiliations', value: `owner:${user1}@${xmppHost},member:${user2}@${xmppHost}` },
-      ],
-    }, Math.min(8000, timeoutMs))
-    details.roomCreate = { ok: createRes.ok, status: createRes.status }
-    if (!createRes.ok) {
-      details.roomCreate.error = createRes.data
-      return { ok: false, durationMs: nowMs() - start, errorText: `XMPP_ROOM_CREATE_FAILED`, details }
-    }
+
+    const adminLocal = String(admin || adminDefault).split('@')[0] || 'admin'
+    const adminJoinTimeout = Math.min(10000, timeoutMs)
+    // Keep the admin session connected until user1/user2 are in the room.
+    // Otherwise, if the room isn't persistent for any reason, it can disappear between joins and users
+    // will get: "Room creation is denied by service policy".
+    const adminXmpp = await joinRoomByWs(serviceUrl, xmppHost, adminLocal, adminPassword, roomJid, adminJoinTimeout)
+    details.roomCreate = { ok: true, via: 'xmpp_join_as_admin', adminLocal }
 
     // Join room as user2 and listen for the marker message.
     const joinTimeout = Math.min(10000, timeoutMs)
@@ -358,6 +385,7 @@ async function runXmppMucEchoCheck(check: CheckConfig): Promise<CheckRunResult> 
 
     // Cleanup.
     try { xmpp2.off('stanza', messageHandler) } catch {}
+    try { await adminXmpp.stop() } catch {}
     try { await xmpp1.stop() } catch {}
     try { await xmpp2.stop() } catch {}
 
