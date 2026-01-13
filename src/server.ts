@@ -171,7 +171,12 @@ async function main() {
 
   // Serve UI
   const publicDir = path.resolve(__dirname, 'public')
+  // Backward compat: older builds produced dist/public/public/*.html (double-nested).
+  // Prefer the direct path first, but also serve nested content so `/history.html` keeps working.
+  const publicNestedDir = path.resolve(publicDir, 'public')
+
   app.use('/', express.static(publicDir))
+  app.use('/', express.static(publicNestedDir))
 
   const server = app.listen(port, () => {
     console.log(`[ethora-uptime] listening on :${port}`)
