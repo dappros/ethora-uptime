@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import yaml from 'js-yaml'
 
-export type CheckType = 'http' | 'wss' | 'journey'
+export type CheckType = 'http' | 'wss' | 'journey' | 'xmpp_muc_echo'
 export type CheckSeverity = 'critical' | 'optional'
 
 export type StatusRule =
@@ -60,7 +60,8 @@ export function loadConfigFromFile(filePath: string): UptimeConfig {
         throw new Error(`Check is missing required fields (id,name,type) in instance ${inst.id}`)
       }
       if (chk.enabled === false) continue
-      if (chk.type !== 'journey' && !chk?.url) {
+      // Some checks do not use HTTP/WebSocket URLs and instead rely on env config (e.g. journeys and XMPP echo).
+      if (chk.type !== 'journey' && chk.type !== 'xmpp_muc_echo' && !chk?.url) {
         throw new Error(`Check is missing url (required for type=${chk.type}) in instance ${inst.id}`)
       }
       if (chk.severity && chk.severity !== 'critical' && chk.severity !== 'optional') {

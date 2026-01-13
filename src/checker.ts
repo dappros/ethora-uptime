@@ -2,6 +2,8 @@
 import { WebSocket } from 'ws'
 import type { CheckConfig } from './config.js'
 import { getJourneyEnvFromProcess, runJourney } from './journeyRunner.js'
+import crypto from 'node:crypto'
+import { client as xmppClient, xml } from '@xmpp/client'
 
 export type CheckRunResult = {
   ok: boolean
@@ -24,6 +26,9 @@ export async function runCheck(check: CheckConfig): Promise<CheckRunResult> {
   }
   if (check.type === 'journey') {
     return await runJourneyCheck(check)
+  }
+  if (check.type === 'xmpp_muc_echo') {
+    return await runXmppMucEchoCheck(check)
   }
   return { ok: false, durationMs: 0, errorText: `Unknown check type: ${(check as any).type}` }
 }
@@ -155,6 +160,213 @@ async function runJourneyCheck(check: CheckConfig): Promise<CheckRunResult> {
       return { ok: false, durationMs: nowMs() - start, errorText: `skipped: ${e.message}` }
     }
     return { ok: false, durationMs: nowMs() - start, errorText: e?.message || String(e) }
+  }
+}
+
+function envStr(name: string, def = ''): string {
+  const v = process.env[name]
+  if (typeof v !== 'string') return def
+  const s = v.trim()
+  return s ? s : def
+}
+
+function basicAuthHeader(user: string, pass: string): string {
+  return 'Basic ' + Buffer.from(`${user}:${pass}`, 'utf8').toString('base64')
+}
+
+async function ejabberdPostJson(apiUrl: string, httpHost: string, admin: string, adminPassword: string, path: string, body: any, timeoutMs: number) {
+  const controller = new AbortController()
+  const t = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const resp = await fetch(`${apiUrl}${path}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        // Ejabberd routes some HTTP modules by virtual host derived from the HTTP Host header.
+        // When we call ejabberd via Docker DNS (e.g. http://xmpp:5280/api), Host would be "xmpp",
+        // which may not be configured. Force the real XMPP virtual host (usually "localhost").
+        ...(httpHost ? { Host: httpHost } : {}),
+        Authorization: basicAuthHeader(admin, adminPassword),
+      },
+      body: JSON.stringify(body || {}),
+      signal: controller.signal,
+    })
+    const text = await resp.text()
+    let parsed: any = undefined
+    try {
+      parsed = text ? JSON.parse(text) : undefined
+    } catch {
+      parsed = text
+    }
+    return { ok: resp.ok, status: resp.status, data: parsed }
+  } finally {
+    clearTimeout(t)
+  }
+}
+
+function derivePassword(seed: string, tag: string): string {
+  // Deterministic, so operators don't have to store extra secrets in uptime.env.
+  return crypto.createHash('sha256').update(`${seed}:${tag}`).digest('hex').slice(0, 20)
+}
+
+async function joinRoomByWs(serviceUrl: string, domain: string, usernameLocal: string, password: string, roomJid: string, timeoutMs: number) {
+  return await new Promise<any>((resolve, reject) => {
+    const xmpp = xmppClient({ service: serviceUrl, domain, username: usernameLocal, password })
+
+    let timeoutId: any
+    let stanzaHandler: any
+
+    const cleanup = async () => {
+      try { xmpp.off('stanza', stanzaHandler) } catch {}
+      try { if (timeoutId) clearTimeout(timeoutId) } catch {}
+    }
+
+    xmpp.on('error', async (err: any) => {
+      await cleanup()
+      try { await xmpp.stop() } catch {}
+      reject(err)
+    })
+
+    xmpp.on('online', () => {
+      const myNick = xmpp?.jid?.getLocal ? xmpp.jid.getLocal() : usernameLocal
+
+      stanzaHandler = (stanza: any) => {
+        if (!stanza?.is?.('presence')) return
+        if ((stanza.attrs?.from || '').split('/')[0] !== roomJid) return
+        if (stanza.attrs?.type === 'error') {
+          cleanup().then(() => {
+            reject(new Error(`XMPP_JOIN_ERROR:${stanza.toString()}`))
+          })
+          return
+        }
+        cleanup().then(() => resolve(xmpp))
+      }
+
+      xmpp.on('stanza', stanzaHandler)
+      timeoutId = setTimeout(() => {
+        cleanup().then(async () => {
+          try { await xmpp.stop() } catch {}
+          reject(new Error('XMPP_JOIN_ROOM_TIMEOUT'))
+        })
+      }, timeoutMs)
+
+      const presence = xml('presence', { to: `${roomJid}/${myNick}` }, xml('x', 'http://jabber.org/protocol/muc'))
+      xmpp.send(presence)
+    })
+
+    xmpp.start().catch(reject)
+  })
+}
+
+async function runXmppMucEchoCheck(check: CheckConfig): Promise<CheckRunResult> {
+  const start = nowMs()
+  const timeoutMs = Math.max(4000, Number(check.timeoutMs || 15000))
+
+  // Prefer Docker-internal DNS (uptime joins the same network as ejabberd).
+  // Operators can override via env if uptime is deployed differently.
+  const apiUrl = envStr('ETHORA_XMPP_API_URL', 'http://xmpp:5280/api')
+  const serviceUrl = envStr('ETHORA_XMPP_SERVICE', 'ws://xmpp:5280/ws')
+  const xmppHost = envStr('ETHORA_XMPP_HOST', 'localhost')
+  const mucService = envStr('ETHORA_XMPP_MUC_SERVICE', `conference.${xmppHost}`)
+  // Ejabberd HTTP API basic auth typically expects a full JID (e.g. admin@localhost), not just localpart.
+  const adminDefault = `admin@${xmppHost}`
+  const admin = envStr('ETHORA_XMPP_ADMIN', adminDefault)
+  const adminPassword = envStr('ETHORA_XMPP_ADMIN_PASSWORD', '')
+
+  if (!adminPassword) {
+    return { ok: false, durationMs: nowMs() - start, errorText: 'skipped: Missing env: ETHORA_XMPP_ADMIN_PASSWORD' }
+  }
+
+  const user1 = envStr('ETHORA_XMPP_HEALTH_USER1', 'uptime_health_u1')
+  const user2 = envStr('ETHORA_XMPP_HEALTH_USER2', 'uptime_health_u2')
+  const pass1 = envStr('ETHORA_XMPP_HEALTH_PASS1', derivePassword(adminPassword, 'u1'))
+  const pass2 = envStr('ETHORA_XMPP_HEALTH_PASS2', derivePassword(adminPassword, 'u2'))
+  const roomName = envStr('ETHORA_XMPP_HEALTH_ROOM', 'uptime_health_room')
+
+  const roomJid = `${roomName}@${mucService}`
+  const marker = `uptime:${Date.now()}:${crypto.randomBytes(6).toString('hex')}`
+
+  const details: Record<string, any> = {
+    roomJid,
+    user1,
+    user2,
+    serviceUrl,
+    apiUrl,
+  }
+
+  try {
+    // Ensure users exist with the expected password.
+    // These are dedicated uptime users; we can safely reset them on each run to avoid drift
+    // (e.g. the user existed from a previous install with a different password).
+    await ejabberdPostJson(apiUrl, xmppHost, admin, adminPassword, '/unregister', { host: xmppHost, user: user1 }, Math.min(6000, timeoutMs))
+    await ejabberdPostJson(apiUrl, xmppHost, admin, adminPassword, '/unregister', { host: xmppHost, user: user2 }, Math.min(6000, timeoutMs))
+    await ejabberdPostJson(apiUrl, xmppHost, admin, adminPassword, '/register', { host: xmppHost, user: user1, password: pass1 }, Math.min(6000, timeoutMs))
+    await ejabberdPostJson(apiUrl, xmppHost, admin, adminPassword, '/register', { host: xmppHost, user: user2, password: pass2 }, Math.min(6000, timeoutMs))
+
+    // Ensure room exists with explicit affiliations (owner=user1, member=user2) so it's not public.
+    await ejabberdPostJson(apiUrl, xmppHost, admin, adminPassword, '/destroy_room', { name: roomName, service: mucService }, Math.min(8000, timeoutMs))
+    const createRes = await ejabberdPostJson(apiUrl, xmppHost, admin, adminPassword, '/create_room_with_opts', {
+      name: roomName,
+      service: mucService,
+      host: xmppHost,
+      options: [
+        { name: 'members_only', value: 'true' },
+        { name: 'persistent', value: 'true' },
+        { name: 'affiliations', value: `owner:${user1}@${xmppHost},member:${user2}@${xmppHost}` },
+      ],
+    }, Math.min(8000, timeoutMs))
+    details.roomCreate = { ok: createRes.ok, status: createRes.status }
+    if (!createRes.ok) {
+      details.roomCreate.error = createRes.data
+      return { ok: false, durationMs: nowMs() - start, errorText: `XMPP_ROOM_CREATE_FAILED`, details }
+    }
+
+    // Join room as user2 and listen for the marker message.
+    const joinTimeout = Math.min(10000, timeoutMs)
+    const xmpp2 = await joinRoomByWs(serviceUrl, xmppHost, user2, pass2, roomJid, joinTimeout)
+
+    let received = false
+    let messageHandler: any
+    const receivedPromise = new Promise<void>((resolve, reject) => {
+      messageHandler = (stanza: any) => {
+        try {
+          if (!stanza?.is?.('message')) return
+          if (stanza.attrs?.type !== 'groupchat') return
+          if ((stanza.attrs?.from || '').split('/')[0] !== roomJid) return
+          const body = stanza.getChildText?.('body') || ''
+          if (body === marker) {
+            received = true
+            resolve()
+          }
+        } catch (e) {
+          reject(e)
+        }
+      }
+      xmpp2.on('stanza', messageHandler)
+    })
+
+    // Join room as user1 and send message.
+    const xmpp1 = await joinRoomByWs(serviceUrl, xmppHost, user1, pass1, roomJid, joinTimeout)
+    const msg = xml('message', { to: roomJid, type: 'groupchat', id: `uptime-${Date.now()}` }, xml('body', {}, marker))
+    xmpp1.send(msg)
+
+    // Await receipt.
+    await Promise.race([
+      receivedPromise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('XMPP_ECHO_TIMEOUT')), Math.min(7000, timeoutMs))),
+    ])
+
+    // Cleanup.
+    try { xmpp2.off('stanza', messageHandler) } catch {}
+    try { await xmpp1.stop() } catch {}
+    try { await xmpp2.stop() } catch {}
+
+    details.received = received
+    return { ok: true, durationMs: nowMs() - start, details }
+  } catch (e: any) {
+    details.received = false
+    details.error = e?.message || String(e)
+    return { ok: false, durationMs: nowMs() - start, errorText: details.error, details }
   }
 }
 
