@@ -236,12 +236,21 @@ function derivePassword(seed: string, tag: string): string {
   return crypto.createHash('sha256').update(`${seed}:${tag}`).digest('hex').slice(0, 20)
 }
 
-async function joinRoomByWs(serviceUrl: string, domain: string, usernameLocal: string, password: string, roomJid: string, timeoutMs: number) {
+async function joinRoomByWs(
+  serviceUrl: string,
+  domain: string,
+  usernameLocal: string,
+  password: string,
+  roomJid: string,
+  timeoutMs: number,
+  stage: string
+) {
   return await new Promise<any>((resolve, reject) => {
     const xmpp = xmppClient({ service: serviceUrl, domain, username: usernameLocal, password })
 
     let timeoutId: any
     let stanzaHandler: any
+    let lastPresenceError: string | undefined
 
     const cleanup = async () => {
       try { xmpp.off('stanza', stanzaHandler) } catch {}
@@ -259,13 +268,14 @@ async function joinRoomByWs(serviceUrl: string, domain: string, usernameLocal: s
 
       stanzaHandler = (stanza: any) => {
         if (!stanza?.is?.('presence')) return
-        if ((stanza.attrs?.from || '').split('/')[0] !== roomJid) return
+        // If ejabberd rejects the join, it may send a presence error with a `from` that is not the room JID.
+        // Surface it immediately so operators see the real reason (AccessRules/mod_ethora/muc policy), not a timeout.
         if (stanza.attrs?.type === 'error') {
-          cleanup().then(() => {
-            reject(new Error(`XMPP_JOIN_ERROR:${stanza.toString()}`))
-          })
+          lastPresenceError = stanza.toString()
+          cleanup().then(() => reject(new Error(`XMPP_JOIN_ERROR(${stage}):${lastPresenceError}`)))
           return
         }
+        if ((stanza.attrs?.from || '').split('/')[0] !== roomJid) return
         cleanup().then(() => resolve(xmpp))
       }
 
@@ -273,7 +283,7 @@ async function joinRoomByWs(serviceUrl: string, domain: string, usernameLocal: s
       timeoutId = setTimeout(() => {
         cleanup().then(async () => {
           try { await xmpp.stop() } catch {}
-          reject(new Error('XMPP_JOIN_ROOM_TIMEOUT'))
+          reject(new Error(lastPresenceError ? `XMPP_JOIN_ROOM_TIMEOUT(${stage}):${lastPresenceError}` : `XMPP_JOIN_ROOM_TIMEOUT(${stage})`))
         })
       }, timeoutMs)
 
@@ -345,12 +355,12 @@ async function runXmppMucEchoCheck(check: CheckConfig): Promise<CheckRunResult> 
     // Keep the admin session connected until user1/user2 are in the room.
     // Otherwise, if the room isn't persistent for any reason, it can disappear between joins and users
     // will get: "Room creation is denied by service policy".
-    const adminXmpp = await joinRoomByWs(serviceUrl, xmppHost, adminLocal, adminPassword, roomJid, adminJoinTimeout)
+  const adminXmpp = await joinRoomByWs(serviceUrl, xmppHost, adminLocal, adminPassword, roomJid, adminJoinTimeout, 'admin_join_create_room')
     details.roomCreate = { ok: true, via: 'xmpp_join_as_admin', adminLocal }
 
     // Join room as user2 and listen for the marker message.
     const joinTimeout = Math.min(10000, timeoutMs)
-    const xmpp2 = await joinRoomByWs(serviceUrl, xmppHost, user2, pass2, roomJid, joinTimeout)
+  const xmpp2 = await joinRoomByWs(serviceUrl, xmppHost, user2, pass2, roomJid, joinTimeout, 'user2_join')
 
     let received = false
     let messageHandler: any
@@ -373,7 +383,7 @@ async function runXmppMucEchoCheck(check: CheckConfig): Promise<CheckRunResult> 
     })
 
     // Join room as user1 and send message.
-    const xmpp1 = await joinRoomByWs(serviceUrl, xmppHost, user1, pass1, roomJid, joinTimeout)
+  const xmpp1 = await joinRoomByWs(serviceUrl, xmppHost, user1, pass1, roomJid, joinTimeout, 'user1_join')
     const msg = xml('message', { to: roomJid, type: 'groupchat', id: `uptime-${Date.now()}` }, xml('body', {}, marker))
     xmpp1.send(msg)
 
