@@ -6,6 +6,7 @@ import { createDb, ensureSchema, upsertConfig } from './db.js'
 import { loadConfigFromFile } from './config.js'
 import { startScheduler } from './scheduler.js'
 import { runCheck } from './checker.js'
+import { isCheckLocked, withCheckLock } from './runLock.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -59,8 +60,12 @@ async function main() {
     if (!chk) return res.status(404).json({ error: 'check not found' })
     // NOTE: disabled checks are not scheduled, but can still be run manually via this endpoint.
 
+    if (isCheckLocked(checkId)) {
+      return res.status(409).json({ error: 'check already running', code: 'CHECK_ALREADY_RUNNING', checkId })
+    }
+
     const startedAt = Date.now()
-    const run = await runCheck(chk)
+    const run = await withCheckLock(checkId, async () => await runCheck(chk))
     await db.pool.query(
       `insert into check_runs(check_id, ok, status_code, duration_ms, error_text, details)
        values($1,$2,$3,$4,$5,$6)`,

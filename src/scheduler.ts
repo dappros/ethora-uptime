@@ -2,6 +2,7 @@
 import type { Db } from './db.js'
 import type { UptimeConfig } from './config.js'
 import { runCheck } from './checker.js'
+import { isCheckLocked, withCheckLock } from './runLock.js'
 
 export type Scheduler = {
   stop: () => void
@@ -18,8 +19,9 @@ export function startScheduler(db: Db, cfg: UptimeConfig): Scheduler {
       const intervalMs = Math.max(5, Number(chk.intervalSeconds || 60)) * 1000
 
       const tick = async () => {
+        if (isCheckLocked(checkId)) return
         const startedAt = Date.now()
-        const res = await runCheck(chk)
+        const res = await withCheckLock(checkId, async () => await runCheck(chk))
         const durationMs = res.durationMs || (Date.now() - startedAt)
 
         await db.pool.query(
