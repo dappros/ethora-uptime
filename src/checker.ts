@@ -236,6 +236,30 @@ function derivePassword(seed: string, tag: string): string {
   return crypto.createHash('sha256').update(`${seed}:${tag}`).digest('hex').slice(0, 20)
 }
 
+async function ensureXmppUser(apiUrl: string, xmppHost: string, admin: string, adminPassword: string, user: string, password: string, timeoutMs: number) {
+  // Try to register. If the account already exists, set/overwrite its password.
+  const reg = await ejabberdPostJson(apiUrl, xmppHost, admin, adminPassword, '/register', { host: xmppHost, user, password }, timeoutMs)
+  if (reg.ok) return { ok: true, via: 'register' as const }
+
+  const regText = typeof reg.data === 'string' ? reg.data : JSON.stringify(reg.data || {})
+  const looksLikeAlreadyExists =
+    reg.status === 409 ||
+    regText.toLowerCase().includes('conflict') ||
+    regText.toLowerCase().includes('already') ||
+    regText.toLowerCase().includes('exists')
+
+  if (!looksLikeAlreadyExists) {
+    throw new Error(`XMPP_REGISTER_FAILED(${user}): status=${reg.status} data=${regText}`)
+  }
+
+  const ch = await ejabberdPostJson(apiUrl, xmppHost, admin, adminPassword, '/change_password', { host: xmppHost, user, newpass: password }, timeoutMs)
+  if (!ch.ok) {
+    const chText = typeof ch.data === 'string' ? ch.data : JSON.stringify(ch.data || {})
+    throw new Error(`XMPP_CHANGE_PASSWORD_FAILED(${user}): status=${ch.status} data=${chText}`)
+  }
+  return { ok: true, via: 'change_password' as const }
+}
+
 async function joinRoomByWs(
   serviceUrl: string,
   domain: string,
@@ -331,14 +355,19 @@ async function runXmppMucEchoCheck(check: CheckConfig): Promise<CheckRunResult> 
     apiUrl,
   }
 
+  let adminXmpp: any = undefined
+  let xmpp1: any = undefined
+  let xmpp2: any = undefined
+  let messageHandler: any = undefined
+
   try {
     // Ensure users exist with the expected password.
-    // These are dedicated uptime users; we can safely reset them on each run to avoid drift
-    // (e.g. the user existed from a previous install with a different password).
-    await ejabberdPostJson(apiUrl, xmppHost, admin, adminPassword, '/unregister', { host: xmppHost, user: user1 }, Math.min(6000, timeoutMs))
-    await ejabberdPostJson(apiUrl, xmppHost, admin, adminPassword, '/unregister', { host: xmppHost, user: user2 }, Math.min(6000, timeoutMs))
-    await ejabberdPostJson(apiUrl, xmppHost, admin, adminPassword, '/register', { host: xmppHost, user: user1, password: pass1 }, Math.min(6000, timeoutMs))
-    await ejabberdPostJson(apiUrl, xmppHost, admin, adminPassword, '/register', { host: xmppHost, user: user2, password: pass2 }, Math.min(6000, timeoutMs))
+    // IMPORTANT:
+    // Do NOT unregister users on each run. If a previous run is still connected (or a job overlaps),
+    // unregistering will kick the active session with a stream error like: "conflict - User removed".
+    const userOpTimeout = Math.min(6000, timeoutMs)
+    details.user1Ensure = await ensureXmppUser(apiUrl, xmppHost, admin, adminPassword, user1, pass1, userOpTimeout)
+    details.user2Ensure = await ensureXmppUser(apiUrl, xmppHost, admin, adminPassword, user2, pass2, userOpTimeout)
 
     // Ensure room exists.
     //
@@ -355,15 +384,14 @@ async function runXmppMucEchoCheck(check: CheckConfig): Promise<CheckRunResult> 
     // Keep the admin session connected until user1/user2 are in the room.
     // Otherwise, if the room isn't persistent for any reason, it can disappear between joins and users
     // will get: "Room creation is denied by service policy".
-  const adminXmpp = await joinRoomByWs(serviceUrl, xmppHost, adminLocal, adminPassword, roomJid, adminJoinTimeout, 'admin_join_create_room')
+    adminXmpp = await joinRoomByWs(serviceUrl, xmppHost, adminLocal, adminPassword, roomJid, adminJoinTimeout, 'admin_join_create_room')
     details.roomCreate = { ok: true, via: 'xmpp_join_as_admin', adminLocal }
 
     // Join room as user2 and listen for the marker message.
     const joinTimeout = Math.min(10000, timeoutMs)
-  const xmpp2 = await joinRoomByWs(serviceUrl, xmppHost, user2, pass2, roomJid, joinTimeout, 'user2_join')
+    xmpp2 = await joinRoomByWs(serviceUrl, xmppHost, user2, pass2, roomJid, joinTimeout, 'user2_join')
 
     let received = false
-    let messageHandler: any
     const receivedPromise = new Promise<void>((resolve, reject) => {
       messageHandler = (stanza: any) => {
         try {
@@ -383,7 +411,7 @@ async function runXmppMucEchoCheck(check: CheckConfig): Promise<CheckRunResult> 
     })
 
     // Join room as user1 and send message.
-  const xmpp1 = await joinRoomByWs(serviceUrl, xmppHost, user1, pass1, roomJid, joinTimeout, 'user1_join')
+    xmpp1 = await joinRoomByWs(serviceUrl, xmppHost, user1, pass1, roomJid, joinTimeout, 'user1_join')
     const msg = xml('message', { to: roomJid, type: 'groupchat', id: `uptime-${Date.now()}` }, xml('body', {}, marker))
     xmpp1.send(msg)
 
@@ -393,18 +421,18 @@ async function runXmppMucEchoCheck(check: CheckConfig): Promise<CheckRunResult> 
       new Promise((_, reject) => setTimeout(() => reject(new Error('XMPP_ECHO_TIMEOUT')), Math.min(7000, timeoutMs))),
     ])
 
-    // Cleanup.
-    try { xmpp2.off('stanza', messageHandler) } catch {}
-    try { await adminXmpp.stop() } catch {}
-    try { await xmpp1.stop() } catch {}
-    try { await xmpp2.stop() } catch {}
-
     details.received = received
     return { ok: true, durationMs: nowMs() - start, details }
   } catch (e: any) {
     details.received = false
     details.error = e?.message || String(e)
     return { ok: false, durationMs: nowMs() - start, errorText: details.error, details }
+  } finally {
+    // Always cleanup XMPP clients to avoid overlapping runs and "conflict - User removed" errors.
+    try { if (xmpp2 && messageHandler) xmpp2.off('stanza', messageHandler) } catch {}
+    try { if (adminXmpp) await adminXmpp.stop() } catch {}
+    try { if (xmpp1) await xmpp1.stop() } catch {}
+    try { if (xmpp2) await xmpp2.stop() } catch {}
   }
 }
 
