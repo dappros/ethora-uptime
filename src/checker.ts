@@ -150,7 +150,7 @@ async function runJourneyCheck(check: CheckConfig): Promise<CheckRunResult> {
   const timeoutMs = Math.max(1000, Number(check.timeoutMs || 60000))
   try {
     const res = await Promise.race([
-      runJourney(getJourneyEnvFromProcess()),
+      runJourney(getJourneyEnvFromProcess(), { mode: check.id }),
       new Promise<{ ok: boolean; details: any }>((_resolve, reject) =>
         setTimeout(() => reject(new Error('timeout')), timeoutMs)
       ),

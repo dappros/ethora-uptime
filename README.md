@@ -53,6 +53,32 @@ If you want a check to **not** be scheduled, set:
 
 You can still run it from the UI “Run” button (or via `POST /api/run-check`).
 
+## Journey modes
+
+There are two supported journey levels (configured via `checks[].id`):
+
+- `journey` → basic flow (app + users + 1 chat + add member)
+- `journey_advanced` → comprehensive flow (2 chats, membership changes, XMPP delivery, file upload)
+
+### Required env for **basic** journey
+
+- `ETHORA_API_BASE` (e.g. `http://host.docker.internal:8080`)
+- `ETHORA_BASE_DOMAIN_NAME` (base app domain slug)
+- `ETHORA_ADMIN_EMAIL`
+- `ETHORA_ADMIN_PASSWORD`
+
+Optional:
+- `ETHORA_APP_NAME_PREFIX`
+- `ETHORA_USERS_COUNT`
+
+### Additional env for **advanced** journey
+
+Advanced mode requires XMPP websocket connectivity to validate message delivery:
+
+- `ETHORA_XMPP_SERVICE` (e.g. `ws://xmpp:5280/ws`)
+- `ETHORA_XMPP_HOST` (e.g. `localhost` or your XMPP domain)
+- `ETHORA_XMPP_MUC_SERVICE` (optional; defaults to `conference.<XMPP_HOST>`)
+
 ## Running modes
 
 ### Always-on (recommended)

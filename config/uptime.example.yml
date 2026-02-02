@@ -51,4 +51,13 @@ instances:
         intervalSeconds: 3600
         timeoutMs: 180000
 
+      # Optional: comprehensive regression journey (adds chat membership + XMPP + file upload checks)
+      - id: journey_advanced
+        name: Synthetic_journey_advanced
+        type: journey
+        severity: optional
+        enabled: false
+        intervalSeconds: 7200
+        timeoutMs: 240000
+
 
