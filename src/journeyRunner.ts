@@ -332,7 +332,10 @@ async function waitForRoomMessage(xmpp: any, roomJid: string, bodyMatch: string,
       if (stanza.attrs?.type !== 'groupchat') return
       if ((stanza.attrs?.from || '').split('/')[0] !== roomJid) return
       const body = stanza.getChildText?.('body') || ''
-      if (body === bodyMatch) {
+      // Some servers/bridges may omit body for attachment stanzas, but preserve the stanza id.
+      const id = String(stanza.attrs?.id || '')
+      const hasAttachments = Boolean(stanza.getChild?.('attachments'))
+      if (body === bodyMatch || id === bodyMatch || (bodyMatch === 'media' && (id === 'media' || hasAttachments))) {
         cleanup().then(() => resolve())
       }
     }
