@@ -118,7 +118,15 @@ export async function runJourney(env: JourneyEnv, opts?: JourneyOptions): Promis
       {}
     )
     if (!cfgResp.resp.ok) throw new Error(`get-config failed: ${cfgResp.resp.status} ${cfgResp.text}`)
-    const baseAppToken = cfgResp.json?.appToken || cfgResp.json?.app?.appToken
+    // Backends return different shapes here:
+    // - { appToken, ... }
+    // - { app: { appToken } }
+    // - { result: { appToken } }  (monoserver)
+    const baseAppToken =
+      cfgResp.json?.appToken ||
+      cfgResp.json?.app?.appToken ||
+      cfgResp.json?.result?.appToken ||
+      cfgResp.json?.result?.app?.appToken
     if (!baseAppToken) throw new Error('get-config: missing appToken in response')
 
     // 0.1) Login admin user (app auth)
@@ -367,7 +375,15 @@ async function runJourneyAdvanced(env: JourneyEnv): Promise<JourneyResult> {
       {}
     )
     if (!cfgResp.resp.ok) throw new Error(`get-config failed: ${cfgResp.resp.status} ${cfgResp.text}`)
-    const baseAppToken = cfgResp.json?.appToken || cfgResp.json?.app?.appToken
+    // Backends return different shapes here:
+    // - { appToken, ... }
+    // - { app: { appToken } }
+    // - { result: { appToken } }  (monoserver)
+    const baseAppToken =
+      cfgResp.json?.appToken ||
+      cfgResp.json?.app?.appToken ||
+      cfgResp.json?.result?.appToken ||
+      cfgResp.json?.result?.app?.appToken
     if (!baseAppToken) throw new Error('get-config: missing appToken in response')
 
     step('login_admin_user')
