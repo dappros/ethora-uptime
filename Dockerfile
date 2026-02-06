@@ -1,8 +1,9 @@
 ## Ethora.com platform, copyright: Dappros Ltd (c) 2026, all rights reserved
 #
 # NOTE:
-# Uptime ships with compiled JS in `dist/` committed to the repo.
-# This Dockerfile intentionally avoids running `tsc` during image build to reduce network / toolchain flakiness.
+# Uptime is authored in TypeScript and the runtime uses compiled JS in `dist/`.
+# In some deployments `dist/` may not be present in the build context (e.g. git submodule checkouts),
+# so this Dockerfile builds it during image build.
 #
 #
 # IMPORTANT (ARM64 / Apple Silicon VMs):
@@ -10,14 +11,14 @@
 # node_modules with errors like "Exit handler never called!" and then the runtime crashes with:
 #   Cannot find package '/app/node_modules/express/index.js'
 # Using a Debian-based image avoids this class of npm/alpine issues and is still lightweight enough for uptime.
-FROM node:20-bookworm-slim AS deps
+FROM node:20-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 # Pin npm to a stable version to avoid sporadic npm internal errors like:
 #   "npm error Exit handler never called!"
 RUN npm i -g npm@9.9.3 \
  && npm --version
-# Install production deps.
+# Install deps (including devDeps) needed to build TypeScript.
 # NOTE:
 # We intentionally avoid BuildKit cache mounts here. On some environments npm can hit an internal error:
 #   "npm error Exit handler never called!"
@@ -38,12 +39,12 @@ RUN npm config set fund false \
       ok=0; \
       for i in 1 2 3; do \
         echo "[uptime] deps install attempt $i/3"; \
-        npm ci --omit=dev --no-audit --no-fund; rc=$?; \
+        npm ci --no-audit --no-fund; rc=$?; \
         if [ "$rc" -eq 0 ]; then ok=1; break; fi; \
-        echo "[uptime] npm ci failed (rc=$rc); trying npm install (omit=dev)"; \
+        echo "[uptime] npm ci failed (rc=$rc); trying npm install"; \
         rm -rf node_modules || true; \
         npm cache clean --force || true; \
-        npm install --omit=dev --no-audit --no-fund; rc2=$?; \
+        npm install --no-audit --no-fund; rc2=$?; \
         if [ "$rc2" -eq 0 ]; then ok=1; break; fi; \
         echo "[uptime] npm install failed (rc=$rc2); retrying after backoff..."; \
         rm -rf node_modules || true; \
@@ -54,12 +55,21 @@ RUN npm config set fund false \
     ) \
  && test -f /app/node_modules/express/package.json
 
+COPY tsconfig.json ./
+COPY src ./src
+COPY config ./config
+
+# Build TypeScript -> dist and copy public assets (see package.json build script).
+RUN npm run build \
+ # Keep runtime node_modules small
+ && npm prune --omit=dev
+
 FROM node:20-bookworm-slim AS run
 WORKDIR /app
 ENV NODE_ENV=production
-COPY dist ./dist
-COPY --from=deps /app/node_modules ./node_modules
-COPY config ./config
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/config ./config
 EXPOSE 8099
 CMD ["node","dist/server.js"]
 
