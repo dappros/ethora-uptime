@@ -112,16 +112,14 @@
 
         // Wire \"Run\" buttons (journey)
         document.querySelectorAll('button[data-run]').forEach((btn) => {
-          btn.addEventListener('click', async (e) => {
-            // NOTE: `Event.currentTarget` is only set during event dispatch.
-            // After an `await`, browsers may reset it to `null`, causing:
-            // "Cannot set properties of null (setting 'disabled')"
-            const target = e.currentTarget;
-            if (!target) return;
-            const button = target;
-            const checkId = button.getAttribute('data-run');
+          // NOTE:
+          // Avoid relying on `event.currentTarget` across `await` boundaries.
+          // Some browsers reset it to null after the handler yields, which can break
+          // toggling button.disabled in finally blocks.
+          btn.addEventListener('click', async () => {
+            const checkId = btn.getAttribute('data-run');
             if (!checkId) return;
-            button.disabled = true;
+            btn.disabled = true;
             try {
               await fetch('/api/run-check', {
                 method: 'POST',
@@ -129,7 +127,7 @@
                 body: JSON.stringify({ checkId }),
               });
             } finally {
-              button.disabled = false;
+              btn.disabled = false;
               load().catch(() => {});
             }
           });
