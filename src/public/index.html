@@ -21,6 +21,17 @@
       .muted { opacity: 0.7; font-size: 12px; }
       a { color: inherit; }
       button { padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(127,127,127,0.35); background: transparent; cursor: pointer; }
+
+      /* Modal (details) */
+      .modalBackdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: none; align-items: center; justify-content: center; padding: 16px; z-index: 1000; }
+      .modal { width: min(900px, 100%); max-height: min(78vh, 720px); overflow: auto; background: Canvas; border: 1px solid rgba(127,127,127,0.35); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.3); }
+      .modalHeader { display:flex; justify-content: space-between; gap: 12px; align-items: center; padding: 12px 12px 8px; border-bottom: 1px solid rgba(127,127,127,0.2); }
+      .modalTitle { font-weight: 800; }
+      .modalBody { padding: 12px; }
+      .pill { display:inline-flex; align-items:center; gap: 6px; border: 1px solid rgba(127,127,127,0.35); border-radius: 999px; padding: 4px 8px; font-size: 12px; }
+      .stepRow { display:flex; gap:10px; align-items: center; padding: 6px 0; border-bottom: 1px dashed rgba(127,127,127,0.2); }
+      .stepName { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 12px; }
+      .stepTs { margin-left:auto; opacity: 0.7; font-size: 12px; }
     </style>
   </head>
   <body>
@@ -37,16 +48,132 @@
 
     <div class="grid" id="grid"></div>
 
+    <div class="modalBackdrop" id="modalBackdrop" role="dialog" aria-modal="true" aria-hidden="true">
+      <div class="modal">
+        <div class="modalHeader">
+          <div>
+            <div class="modalTitle" id="modalTitle">Details</div>
+            <div class="muted" id="modalSubtitle"></div>
+          </div>
+          <button id="modalCloseBtn">Close</button>
+        </div>
+        <div class="modalBody" id="modalBody"></div>
+      </div>
+    </div>
+
     <script>
       const grid = document.getElementById('grid');
       const updatedAt = document.getElementById('updatedAt');
       const refreshBtn = document.getElementById('refreshBtn');
+
+      const modalBackdrop = document.getElementById('modalBackdrop');
+      const modalTitle = document.getElementById('modalTitle');
+      const modalSubtitle = document.getElementById('modalSubtitle');
+      const modalBody = document.getElementById('modalBody');
+      const modalCloseBtn = document.getElementById('modalCloseBtn');
 
       function statusToClass(st) {
         if (st === 'green') return 'green';
         if (st === 'amber') return 'amber';
         if (st === 'red') return 'red';
         return '';
+      }
+
+      function escapeHtml(s) {
+        return String(s ?? '')
+          .replaceAll('&', '&amp;')
+          .replaceAll('<', '&lt;')
+          .replaceAll('>', '&gt;')
+          .replaceAll('"', '&quot;')
+          .replaceAll("'", '&#39;');
+      }
+
+      function fmtTs(ts) {
+        try { return new Date(ts).toLocaleString(); } catch { return String(ts || ''); }
+      }
+
+      function openModal({ title, subtitle, html }) {
+        modalTitle.textContent = title || 'Details';
+        modalSubtitle.textContent = subtitle || '';
+        modalBody.innerHTML = html || '';
+        modalBackdrop.style.display = 'flex';
+        modalBackdrop.setAttribute('aria-hidden', 'false');
+      }
+
+      function closeModal() {
+        modalBackdrop.style.display = 'none';
+        modalBackdrop.setAttribute('aria-hidden', 'true');
+        modalBody.innerHTML = '';
+      }
+
+      modalCloseBtn.addEventListener('click', () => closeModal());
+      modalBackdrop.addEventListener('click', (e) => {
+        if (e.target === modalBackdrop) closeModal();
+      });
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeModal();
+      });
+
+      function renderJourneySteps(details) {
+        const steps = Array.isArray(details?.steps) ? details.steps : [];
+        const errorMsg = details?.error || '';
+        const items = steps.map((s) => {
+          const name = s?.name || '';
+          const isError = name === 'error';
+          const dot = `<span class="dot ${isError ? 'red' : 'green'}"></span>`;
+          const msg = isError && s?.message ? `<div class="muted">${escapeHtml(s.message)}</div>` : '';
+          return `
+            <div class="stepRow">
+              ${dot}
+              <div>
+                <div class="stepName">${escapeHtml(name)}</div>
+                ${msg}
+              </div>
+              <div class="stepTs">${escapeHtml(s?.ts || '')}</div>
+            </div>
+          `;
+        }).join('');
+        const header = `
+          <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:10px;">
+            <span class="pill"><span class="dot ${details?.ok ? 'green' : 'red'}"></span>${details?.ok ? 'OK' : 'FAIL'}</span>
+            ${details?.durationMs != null ? `<span class="pill">duration ${escapeHtml(details.durationMs)} ms</span>` : ''}
+            ${errorMsg ? `<span class="pill">error: ${escapeHtml(errorMsg)}</span>` : ''}
+          </div>
+        `;
+        const raw = `<details style="margin-top:10px;"><summary class="muted">Raw details</summary><pre style="white-space:pre-wrap; font-size:12px; opacity:0.9;">${escapeHtml(JSON.stringify(details, null, 2))}</pre></details>`;
+        return header + (items || `<div class="muted">No steps captured.</div>`) + raw;
+      }
+
+      function renderRunDetails(checkName, checkId, run) {
+        const ok = Boolean(run?.ok);
+        const statusCode = run?.statusCode;
+        const durationMs = run?.durationMs;
+        const errorText = run?.errorText || '';
+        const ts = run?.ts;
+        const details = run?.details || {};
+
+        const pills = [
+          `<span class="pill"><span class="dot ${ok ? 'green' : 'red'}"></span>${ok ? 'OK' : 'FAIL'}</span>`,
+          statusCode != null ? `<span class="pill">status ${escapeHtml(statusCode)}</span>` : '',
+          durationMs != null ? `<span class="pill">${escapeHtml(durationMs)} ms</span>` : '',
+          ts ? `<span class="pill">${escapeHtml(fmtTs(ts))}</span>` : '',
+        ].filter(Boolean).join(' ');
+
+        const err = errorText ? `<div style="margin-top:10px;"><div class="muted">Error</div><div style="font-weight:700;">${escapeHtml(errorText)}</div></div>` : '';
+
+        const body = (Array.isArray(details?.steps) || typeof details?.error === 'string')
+          ? renderJourneySteps({ ...details, ok, durationMs })
+          : `
+              ${pills}
+              ${err}
+              <details style="margin-top:10px;"><summary class="muted">Raw run</summary><pre style="white-space:pre-wrap; font-size:12px; opacity:0.9;">${escapeHtml(JSON.stringify(run, null, 2))}</pre></details>
+            `;
+
+        openModal({
+          title: checkName || 'Check details',
+          subtitle: checkId || '',
+          html: body,
+        });
       }
 
       async function load() {
@@ -98,7 +225,10 @@
                         <td><a href="/history.html#${encodeURIComponent(c.id)}">${c.name}</a></td>
                         <td>${c.ok ? 'OK' : ('FAIL' + (c.errorText ? ' ('+c.errorText+')' : ''))}${c.statusCode ? ' ('+c.statusCode+')' : ''}</td>
                         <td>${c.durationMs ?? ''}</td>
-                        <td>${c.type === 'journey' ? `<button data-run="${c.id}">Run</button>` : ''}</td>
+                        <td style="text-align:right; white-space:nowrap;">
+                          ${c.type === 'journey' ? `<button data-run="${c.id}" data-name="${escapeHtml(c.name)}">Run</button>` : ''}
+                          <button data-details="${c.id}" data-name="${escapeHtml(c.name)}">Details</button>
+                        </td>
                       </tr>
                     `).join('')}
                   </tbody>
@@ -119,16 +249,58 @@
           btn.addEventListener('click', async () => {
             const checkId = btn.getAttribute('data-run');
             if (!checkId) return;
+            const checkName = btn.getAttribute('data-name') || 'Journey';
+            const oldText = btn.textContent || 'Run';
             btn.disabled = true;
             try {
-              await fetch('/api/run-check', {
+              btn.textContent = 'Running...';
+              const resp = await fetch('/api/run-check', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ checkId }),
               });
+              const json = await resp.json().catch(() => null);
+              if (json?.run) {
+                renderRunDetails(checkName, checkId, json.run);
+              } else {
+                openModal({
+                  title: checkName,
+                  subtitle: checkId,
+                  html: `<div class="muted">No response body.</div>`,
+                });
+              }
             } finally {
               btn.disabled = false;
+              btn.textContent = oldText;
               load().catch(() => {});
+            }
+          });
+        });
+
+        // Wire \"Details\" buttons
+        document.querySelectorAll('button[data-details]').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const checkId = btn.getAttribute('data-details');
+            if (!checkId) return;
+            const checkName = btn.getAttribute('data-name') || 'Check';
+            const oldText = btn.textContent || 'Details';
+            btn.disabled = true;
+            try {
+              btn.textContent = 'Loading...';
+              const resp = await fetch(`/api/last-run?checkId=${encodeURIComponent(checkId)}`);
+              const json = await resp.json().catch(() => null);
+              if (json?.run) {
+                renderRunDetails(checkName, checkId, json.run);
+              } else {
+                openModal({
+                  title: checkName,
+                  subtitle: checkId,
+                  html: `<div class="muted">No run data.</div><pre style="white-space:pre-wrap; font-size:12px;">${escapeHtml(JSON.stringify(json, null, 2))}</pre>`,
+                });
+              }
+            } finally {
+              btn.disabled = false;
+              btn.textContent = oldText;
             }
           });
         });

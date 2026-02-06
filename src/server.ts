@@ -81,6 +81,35 @@ async function main() {
     return res.json({ checkId, run })
   })
 
+  // Fetch last run with full details payload (useful for journeys)
+  app.get('/api/last-run', async (req, res) => {
+    const checkId = String(req.query.checkId || '').trim()
+    if (!checkId) return res.status(422).json({ error: 'checkId is required' })
+
+    const rows = await db.pool.query(
+      `select ok, status_code, duration_ms, ts, error_text, details
+       from check_runs
+       where check_id = $1
+       order by ts desc
+       limit 1`,
+      [checkId]
+    )
+    const row = rows.rows[0]
+    if (!row) return res.status(404).json({ error: 'no runs yet', checkId })
+
+    return res.json({
+      checkId,
+      run: {
+        ok: Boolean(row.ok),
+        statusCode: row.status_code ?? null,
+        durationMs: row.duration_ms ?? null,
+        ts: row.ts,
+        errorText: row.error_text ?? null,
+        details: row.details || {},
+      }
+    })
+  })
+
   app.get('/api/summary', async (_req, res) => {
     const instances = await db.pool.query(
       `select id, name, enabled, tags from instances order by id asc`
