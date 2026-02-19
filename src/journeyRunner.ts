@@ -529,6 +529,12 @@ async function runJourneyAdvanced(env: JourneyEnv): Promise<JourneyResult> {
     aliceXmppValidation.send(msgValidation)
     await waitValidationMsg
 
+    // Important ordering:
+    // The backend sends the MUC "media" message BEFORE returning the HTTP response for /v1/chats/media/*.
+    // If we only start waiting after the upload completes, we can miss the stanza and falsely time out.
+    step('await_media_message')
+    const waitMediaMsg = waitForRoomMessage(bobXmppTest, testRoomJid, 'media', 15000)
+
     step('upload_file')
     const form = new FormData()
     const fileBlob = new Blob([`journey-file-${suffix}`], { type: 'text/plain' })
@@ -545,8 +551,7 @@ async function runJourneyAdvanced(env: JourneyEnv): Promise<JourneyResult> {
     const mediaLoc = uploadJson?.results?.[0]?.location
     if (!mediaLoc) throw new Error('file upload: missing results[0].location')
 
-    step('await_media_message')
-    await waitForRoomMessage(bobXmppTest, testRoomJid, 'media', 12000)
+    await waitMediaMsg
 
     // Stop Bob in the Test room before removal to avoid lingering membership.
     try { await bobXmppTest.stop() } catch {}
