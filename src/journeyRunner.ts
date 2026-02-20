@@ -25,15 +25,22 @@ export type JourneyResult = {
   details: Record<string, any>
 }
 
-function normalizeObserverRoomName(input: string, baseAppId: string) {
+function normalizeObserverRoomJid(input: string, baseAppId: string, mucServiceDefault: string) {
   const s = String(input || '').trim()
   if (!s) return ''
-  // If a full JID was provided, strip @... and keep the room localpart.
-  const roomName = s.includes('@') ? s.split('@')[0] : s
-  if (!baseAppId) return roomName
-  if (roomName.startsWith(`${baseAppId}_`)) return roomName
-  // Allow passing a short suffix like "operator-room" and prefix it with appId for mod_ethora compatibility.
-  return `${baseAppId}_${roomName}`
+
+  const [rawLocal, rawDomain] = s.includes('@') ? s.split('@', 2) : [s, '']
+  const local = String(rawLocal || '').trim()
+  if (!local) return ''
+
+  const normalizedLocal = !baseAppId
+    ? local
+    : local.startsWith(`${baseAppId}_`)
+      ? local
+      : `${baseAppId}_${local}`
+
+  const domain = String(rawDomain || '').trim() || mucServiceDefault
+  return `${normalizedLocal}@${domain}`
 }
 
 function must(value: string | undefined, name: string) {
@@ -447,8 +454,7 @@ async function runJourneyAdvanced(env: JourneyEnv, opts?: JourneyOptions): Promi
           const adminXmppPassword = String(adminUser?.xmppPassword || '').trim()
           if (adminXmppUsername && adminXmppPassword) {
             const xmppEnv = getXmppEnvFromProcess()
-            const roomName = normalizeObserverRoomName(rawObserverRoom, baseAppId)
-            observerRoomJid = `${roomName}@${xmppEnv.mucService}`
+            observerRoomJid = normalizeObserverRoomJid(rawObserverRoom, baseAppId, xmppEnv.mucService)
 
             observerXmpp = await joinRoomByWs(
               xmppEnv.serviceUrl,
