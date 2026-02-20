@@ -20,6 +20,15 @@ function nowMs() {
 }
 
 export async function runCheck(check: CheckConfig): Promise<CheckRunResult> {
+  return await runCheckWithOpts(check)
+}
+
+export type RunCheckOpts = {
+  // Optional operator observer room for journey checks (room name or room JID).
+  journeyObserverRoom?: string
+}
+
+export async function runCheckWithOpts(check: CheckConfig, opts: RunCheckOpts = {}): Promise<CheckRunResult> {
   if (check.type === 'http') {
     return await runHttpCheck(check)
   }
@@ -27,7 +36,7 @@ export async function runCheck(check: CheckConfig): Promise<CheckRunResult> {
     return await runWssCheck(check)
   }
   if (check.type === 'journey') {
-    return await runJourneyCheck(check)
+    return await runJourneyCheck(check, opts)
   }
   if (check.type === 'xmpp_muc_echo') {
     return await runXmppMucEchoCheck(check)
@@ -144,13 +153,13 @@ async function runWssCheck(check: CheckConfig): Promise<CheckRunResult> {
   })
 }
 
-async function runJourneyCheck(check: CheckConfig): Promise<CheckRunResult> {
+async function runJourneyCheck(check: CheckConfig, opts: RunCheckOpts): Promise<CheckRunResult> {
   const start = nowMs()
   // Allow per-check timeout (best-effort)
   const timeoutMs = Math.max(1000, Number(check.timeoutMs || 60000))
   try {
     const res = await Promise.race([
-      runJourney(getJourneyEnvFromProcess(), { mode: check.id }),
+      runJourney(getJourneyEnvFromProcess(), { mode: check.id, observerRoom: opts?.journeyObserverRoom }),
       new Promise<{ ok: boolean; details: any }>((_resolve, reject) =>
         setTimeout(() => reject(new Error('timeout')), timeoutMs)
       ),

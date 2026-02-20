@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { createDb, ensureSchema, upsertConfig } from './db.js'
 import { loadConfigFromFile } from './config.js'
 import { startScheduler } from './scheduler.js'
-import { runCheck } from './checker.js'
+import { runCheckWithOpts } from './checker.js'
 import { isCheckLocked, withCheckLock } from './runLock.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -65,7 +65,12 @@ async function main() {
     }
 
     const startedAt = Date.now()
-    const run = await withCheckLock(checkId, async () => await runCheck(chk))
+    const journeyObserverRoom = String(req.body?.journeyObserverRoom || '').trim()
+    const run = await withCheckLock(checkId, async () => {
+      return await runCheckWithOpts(chk, {
+        journeyObserverRoom: journeyObserverRoom || undefined,
+      })
+    })
     await db.pool.query(
       `insert into check_runs(check_id, ok, status_code, duration_ms, error_text, details)
        values($1,$2,$3,$4,$5,$6)`,

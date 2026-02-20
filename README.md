@@ -79,6 +79,22 @@ Advanced mode requires XMPP websocket connectivity to validate message delivery:
 - `ETHORA_XMPP_HOST` (e.g. `localhost` or your XMPP domain)
 - `ETHORA_XMPP_MUC_SERVICE` (optional; defaults to `conference.<XMPP_HOST>`)
 
+## Operator observer room (watch journeys live)
+
+By default, journey runs create their own temporary chats and operate there (so membership/removal tests are isolated).
+
+If you want to **watch a journey run live** in an existing chat room, you can provide an *observer room* and the journey
+will stream high-level progress updates into that room (best-effort).
+
+- **From the UI**: click **Run** on a journey check and enter an **Observer room JID / name** when prompted.
+- **From env (default for all runs)**: set `ETHORA_JOURNEY_OBSERVER_ROOM` to a room name or full room JID.
+
+Notes:
+- The observer room is **not** used for the journey’s membership tests; it’s only an operator “log stream”.
+- You can paste either:
+  - a full room JID like `APPID_operator@conference.xmpp.example.com`, or
+  - a short room name / suffix like `operator` (it will be prefixed as `APPID_operator` for multi-tenant ejabberd).
+
 ## Running modes
 
 ### Always-on (recommended)

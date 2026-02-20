@@ -15,11 +15,25 @@ type JourneyMode = 'basic' | 'advanced'
 
 type JourneyOptions = {
   mode?: string
+  // Optional operator room to stream journey progress into (room name or full room JID).
+  // This does NOT replace the journey's own test rooms; it is only an observer stream.
+  observerRoom?: string
 }
 
 export type JourneyResult = {
   ok: boolean
   details: Record<string, any>
+}
+
+function normalizeObserverRoomName(input: string, baseAppId: string) {
+  const s = String(input || '').trim()
+  if (!s) return ''
+  // If a full JID was provided, strip @... and keep the room localpart.
+  const roomName = s.includes('@') ? s.split('@')[0] : s
+  if (!baseAppId) return roomName
+  if (roomName.startsWith(`${baseAppId}_`)) return roomName
+  // Allow passing a short suffix like "operator-room" and prefix it with appId for mod_ethora compatibility.
+  return `${baseAppId}_${roomName}`
 }
 
 function must(value: string | undefined, name: string) {
@@ -85,7 +99,7 @@ async function httpJson(method: string, url: string, headers: Record<string, str
 
 export async function runJourney(env: JourneyEnv, opts?: JourneyOptions): Promise<JourneyResult> {
   const mode = resolveMode(env, opts)
-  if (mode === 'advanced') return await runJourneyAdvanced(env)
+  if (mode === 'advanced') return await runJourneyAdvanced(env, opts)
 
   const suffix = randSuffix()
   const appDisplayName = `${env.appNamePrefix}-${suffix}`
@@ -348,7 +362,7 @@ async function waitForRoomMessage(xmpp: any, roomJid: string, bodyMatch: string,
   })
 }
 
-async function runJourneyAdvanced(env: JourneyEnv): Promise<JourneyResult> {
+async function runJourneyAdvanced(env: JourneyEnv, opts?: JourneyOptions): Promise<JourneyResult> {
   const suffix = randSuffix()
   const appDisplayName = `${env.appNamePrefix}-${suffix}`
   const details: Record<string, any> = {
@@ -369,6 +383,22 @@ async function runJourneyAdvanced(env: JourneyEnv): Promise<JourneyResult> {
   let validationChatName: string | null = null
 
   const xmppClients: any[] = []
+  let observerXmpp: any | null = null
+  let observerRoomJid: string | null = null
+
+  const notify = (msg: string) => {
+    if (!observerXmpp || !observerRoomJid) return
+    try {
+      const stanza = xml(
+        'message',
+        { to: observerRoomJid, type: 'groupchat', id: `journey-observer-${Date.now()}` },
+        xml('body', {}, String(msg).slice(0, 1800))
+      )
+      observerXmpp.send(stanza)
+    } catch {
+      // ignore
+    }
+  }
 
   try {
     step('get_base_app_config')
@@ -389,6 +419,55 @@ async function runJourneyAdvanced(env: JourneyEnv): Promise<JourneyResult> {
       cfgResp.json?.result?.app?.appToken
     if (!baseAppToken) throw new Error('get-config: missing appToken in response')
 
+    // Optional: stream journey steps into an existing operator chat room (best-effort).
+    // Configure via env:
+    // - ETHORA_JOURNEY_OBSERVER_ROOM=<roomName or roomJid>
+    //   (If roomName does not start with "<baseAppId>_", it will be prefixed automatically.)
+    try {
+      const rawObserverRoom = String(opts?.observerRoom || process.env.ETHORA_JOURNEY_OBSERVER_ROOM || '').trim()
+      if (rawObserverRoom) {
+        const baseAppObj =
+          cfgResp.json?.app ||
+          cfgResp.json?.result?.app ||
+          cfgResp.json?.result ||
+          cfgResp.json
+        const baseAppId = String(baseAppObj?._id || baseAppObj?.id || '').trim()
+
+        // Login admin via v2 to get XMPP creds (xmppPassword is usually only present in v2 login response).
+        const adminLoginV2 = await httpJson(
+          'POST',
+          `${env.ethoraApiBase}/v2/users/login-with-email`,
+          { Authorization: String(baseAppToken) },
+          { email: env.adminEmail, password: env.adminPassword }
+        )
+
+        if (adminLoginV2.resp.ok) {
+          const adminUser = adminLoginV2.json?.user
+          const adminXmppUsername = String(adminUser?.xmppUsername || '').trim()
+          const adminXmppPassword = String(adminUser?.xmppPassword || '').trim()
+          if (adminXmppUsername && adminXmppPassword) {
+            const xmppEnv = getXmppEnvFromProcess()
+            const roomName = normalizeObserverRoomName(rawObserverRoom, baseAppId)
+            observerRoomJid = `${roomName}@${xmppEnv.mucService}`
+
+            observerXmpp = await joinRoomByWs(
+              xmppEnv.serviceUrl,
+              xmppEnv.host,
+              adminXmppUsername,
+              adminXmppPassword,
+              observerRoomJid,
+              8000,
+              'observer'
+            )
+            xmppClients.push(observerXmpp)
+            notify(`Uptime synthetic journey started (${suffix}) mode=advanced`)
+          }
+        }
+      }
+    } catch {
+      // observer is best-effort
+    }
+
     step('login_admin_user')
     const loginResp = await httpJson(
       'POST',
@@ -399,6 +478,7 @@ async function runJourneyAdvanced(env: JourneyEnv): Promise<JourneyResult> {
     if (!loginResp.resp.ok) throw new Error(`login-with-email failed: ${loginResp.resp.status} ${loginResp.text}`)
     ownerUserToken = loginResp.json?.token
     if (!ownerUserToken) throw new Error('login-with-email: missing token')
+    notify('login_admin_user ok')
 
     step('create_app')
     const createAppResp = await httpJson(
@@ -414,6 +494,7 @@ async function runJourneyAdvanced(env: JourneyEnv): Promise<JourneyResult> {
     newAppToken = appObj?.appToken
     if (!newAppId) throw new Error('create app: missing app._id')
     if (!newAppToken) throw new Error('create app: missing app.appToken')
+    notify(`create_app ok appId=${newAppId}`)
 
     const usersCount = Math.max(3, Number(env.usersCount || 3))
     for (let i = 0; i < usersCount; i++) {
@@ -449,6 +530,7 @@ async function runJourneyAdvanced(env: JourneyEnv): Promise<JourneyResult> {
         id: String(user._id),
       })
     }
+    notify(`users ready count=${users.length}`)
 
     if (users.length < 3) throw new Error('advanced journey requires at least 3 users')
     const [alice, bob, charlie] = users
@@ -463,6 +545,7 @@ async function runJourneyAdvanced(env: JourneyEnv): Promise<JourneyResult> {
     if (!createTestChat.resp.ok) throw new Error(`create test chat failed: ${createTestChat.resp.status} ${createTestChat.text}`)
     testChatName = createTestChat.json?.result?.name
     if (!testChatName) throw new Error('create test chat: missing result.name')
+    notify(`create_chat_test ok room=${testChatName}`)
 
     step('create_chat_validation')
     const createValidationChat = await httpJson(
@@ -474,6 +557,7 @@ async function runJourneyAdvanced(env: JourneyEnv): Promise<JourneyResult> {
     if (!createValidationChat.resp.ok) throw new Error(`create validation chat failed: ${createValidationChat.resp.status} ${createValidationChat.text}`)
     validationChatName = createValidationChat.json?.result?.name
     if (!validationChatName) throw new Error('create validation chat: missing result.name')
+    notify(`create_chat_validation ok room=${validationChatName}`)
 
     step('add_members_test')
     const addTest = await httpJson(
@@ -483,6 +567,7 @@ async function runJourneyAdvanced(env: JourneyEnv): Promise<JourneyResult> {
       { chatName: testChatName, members: [bob.xmppUsername, charlie.xmppUsername] }
     )
     if (!addTest.resp.ok) throw new Error(`add test members failed: ${addTest.resp.status} ${addTest.text}`)
+    notify('add_members_test ok')
 
     step('add_members_validation')
     const addValidation = await httpJson(
@@ -492,6 +577,7 @@ async function runJourneyAdvanced(env: JourneyEnv): Promise<JourneyResult> {
       { chatName: validationChatName, members: [bob.xmppUsername] }
     )
     if (!addValidation.resp.ok) throw new Error(`add validation members failed: ${addValidation.resp.status} ${addValidation.text}`)
+    notify('add_members_validation ok')
 
     const xmppEnv = getXmppEnvFromProcess()
     const testRoomJid = `${testChatName}@${xmppEnv.mucService}`
@@ -501,6 +587,7 @@ async function runJourneyAdvanced(env: JourneyEnv): Promise<JourneyResult> {
     const bobXmppTest = await joinRoomByWs(xmppEnv.serviceUrl, xmppEnv.host, bob.xmppUsername, bob.xmppPassword, testRoomJid, 12000, 'bob_test')
     const aliceXmppTest = await joinRoomByWs(xmppEnv.serviceUrl, xmppEnv.host, alice.xmppUsername, alice.xmppPassword, testRoomJid, 12000, 'alice_test')
     xmppClients.push(bobXmppTest, aliceXmppTest)
+    notify('xmpp_join_test ok')
 
     const testMarker = `journey-test-${suffix}-${Date.now()}`
     step('send_test_message')
@@ -512,11 +599,13 @@ async function runJourneyAdvanced(env: JourneyEnv): Promise<JourneyResult> {
     )
     aliceXmppTest.send(msg)
     await waitTestMsg
+    notify('send_test_message ok')
 
     step('xmpp_join_validation')
     const bobXmppValidation = await joinRoomByWs(xmppEnv.serviceUrl, xmppEnv.host, bob.xmppUsername, bob.xmppPassword, validationRoomJid, 12000, 'bob_validation')
     const aliceXmppValidation = await joinRoomByWs(xmppEnv.serviceUrl, xmppEnv.host, alice.xmppUsername, alice.xmppPassword, validationRoomJid, 12000, 'alice_validation')
     xmppClients.push(bobXmppValidation, aliceXmppValidation)
+    notify('xmpp_join_validation ok')
 
     const validationMarker = `journey-validation-${suffix}-${Date.now()}`
     step('send_validation_message')
@@ -528,6 +617,7 @@ async function runJourneyAdvanced(env: JourneyEnv): Promise<JourneyResult> {
     )
     aliceXmppValidation.send(msgValidation)
     await waitValidationMsg
+    notify('send_validation_message ok')
 
     // Important ordering:
     // The backend sends the MUC "media" message BEFORE returning the HTTP response for /v1/chats/media/*.
@@ -552,6 +642,7 @@ async function runJourneyAdvanced(env: JourneyEnv): Promise<JourneyResult> {
     if (!mediaLoc) throw new Error('file upload: missing results[0].location')
 
     await waitMediaMsg
+    notify(`upload_file ok media=${mediaLoc}`)
 
     // Stop Bob in the Test room before removal to avoid lingering membership.
     try { await bobXmppTest.stop() } catch {}
@@ -588,9 +679,11 @@ async function runJourneyAdvanced(env: JourneyEnv): Promise<JourneyResult> {
     aliceXmppTest.send(msgAfterRemove)
 
     step('ok')
+    notify('journey ok')
     return { ok: true, details }
   } catch (e: any) {
     step('error', { message: e?.message || String(e) })
+    notify(`journey error: ${e?.message || String(e)}`)
     return { ok: false, details: { ...details, error: e?.message || String(e) } }
   } finally {
     for (const client of xmppClients) {
