@@ -244,6 +244,7 @@
           card.className = 'card';
           const critical = inst.checks.filter(c => (c.severity || 'critical') === 'critical');
           const optional = inst.checks.filter(c => (c.severity || 'critical') !== 'critical');
+          const optionalCount = optional.length + 1; // + Push_validate manual action
           const buildLine = inst.build
             ? [
                 // Prefer date-based buildVersion (yy.mm.dd) if present; fallback to semantic version.
@@ -273,34 +274,41 @@
                 `).join('')}
               </tbody>
             </table>
-            ${optional.length ? `
-              <details style="margin-top:10px;">
-                <summary class="muted">Optional checks (${optional.length})</summary>
-                <table>
-                  <thead><tr><th>Check</th><th>Last</th><th>ms</th><th></th></tr></thead>
-                  <tbody>
-                    ${optional.map(c => `
-                      <tr>
-                        <td><a href="/history.html#${encodeURIComponent(c.id)}">${c.name}</a></td>
-                        <td>${c.ok ? 'OK' : ('FAIL' + (c.errorText ? ' ('+c.errorText+')' : ''))}${c.statusCode ? ' ('+c.statusCode+')' : ''}</td>
-                        <td>${c.durationMs ?? ''}</td>
-                        <td style="text-align:right; white-space:nowrap;">
-                          ${c.type === 'journey' ? `<button data-run="${c.id}" data-run-kind="journey" data-name="${escapeHtml(c.name)}">Run</button>` : ''}
-                          ${c.type === 'push_validate' ? `<button data-run="${c.id}" data-run-kind="push_validate" data-name="${escapeHtml(c.name)}">Run</button>` : ''}
-                          <button data-details="${c.id}" data-name="${escapeHtml(c.name)}">Details</button>
-                        </td>
-                      </tr>
-                    `).join('')}
-                  </tbody>
-                </table>
-              </details>
-            ` : ''}
+            <details style="margin-top:10px;">
+              <summary class="muted">Optional checks (${optionalCount})</summary>
+              <table>
+                <thead><tr><th>Check</th><th>Last</th><th>ms</th><th></th></tr></thead>
+                <tbody>
+                  <tr>
+                    <td>Push_validate</td>
+                    <td class="muted">manual</td>
+                    <td></td>
+                    <td style="text-align:right; white-space:nowrap;">
+                      <button data-run="action:push_validate" data-run-kind="push_validate" data-instance="${escapeHtml(inst.id)}" data-name="Push_validate">Run</button>
+                      <button data-details="action:push_validate" data-details-kind="push_validate" data-instance="${escapeHtml(inst.id)}" data-name="Push_validate">Details</button>
+                    </td>
+                  </tr>
+                  ${optional.map(c => `
+                    <tr>
+                      <td><a href="/history.html#${encodeURIComponent(c.id)}">${c.name}</a></td>
+                      <td>${c.ok ? 'OK' : ('FAIL' + (c.errorText ? ' ('+c.errorText+')' : ''))}${c.statusCode ? ' ('+c.statusCode+')' : ''}</td>
+                      <td>${c.durationMs ?? ''}</td>
+                      <td style="text-align:right; white-space:nowrap;">
+                        ${c.type === 'journey' ? `<button data-run="${c.id}" data-run-kind="journey" data-instance="${escapeHtml(inst.id)}" data-name="${escapeHtml(c.name)}">Run</button>` : ''}
+                        ${c.type === 'push_validate' ? `<button data-run="${c.id}" data-run-kind="push_validate" data-instance="${escapeHtml(inst.id)}" data-name="${escapeHtml(c.name)}">Run</button>` : ''}
+                        <button data-details="${c.id}" data-name="${escapeHtml(c.name)}">Details</button>
+                      </td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </details>
           `;
           grid.appendChild(card);
         }
         updatedAt.textContent = 'Updated: ' + new Date().toLocaleTimeString();
 
-        // Wire \"Run\" buttons (journey)
+        // Wire \"Run\" buttons
         document.querySelectorAll('button[data-run]').forEach((btn) => {
           // NOTE:
           // Avoid relying on `event.currentTarget` across `await` boundaries.
@@ -312,6 +320,7 @@
             const checkName = btn.getAttribute('data-name') || 'Journey';
             const oldText = btn.textContent || 'Run';
             const kind = btn.getAttribute('data-run-kind') || '';
+            const instanceId = btn.getAttribute('data-instance') || '';
             let journeyObserverRoom = '';
             if (kind === 'journey') {
               const v = await askJourneyObserverRoom(checkName);
@@ -321,20 +330,66 @@
             btn.disabled = true;
             try {
               btn.textContent = 'Running...';
-              const resp = await fetch('/api/run-check', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ checkId, journeyObserverRoom: journeyObserverRoom || undefined }),
-              });
-              const json = await resp.json().catch(() => null);
-              if (json?.run) {
-                renderRunDetails(checkName, checkId, json.run);
+              if (kind === 'push_validate') {
+                // Prefer /api/run-check if configured; fallback to manual action.
+                let json = null;
+                let ranVia = '';
+                try {
+                  const resp = await fetch('/api/run-check', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ checkId }),
+                  });
+                  json = await resp.json().catch(() => null);
+                  if (resp.ok && json?.run) {
+                    ranVia = 'run-check';
+                  } else {
+                    json = null;
+                  }
+                } catch {
+                  json = null;
+                }
+
+                if (!json) {
+                  ranVia = 'action';
+                  const resp = await fetch('/api/actions/push-validate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ instanceId }),
+                  });
+                  json = await resp.json().catch(() => null);
+                }
+
+                if (json?.run) {
+                  const title = instanceId ? `${checkName} (${instanceId})` : checkName;
+                  const id = json.actionId || checkId;
+                  renderRunDetails(title, id, json.run);
+                  if (ranVia === 'action') {
+                    try { localStorage.setItem(`push_validate:lastRun:${instanceId || 'default'}`, JSON.stringify({ title, id, run: json.run })); } catch {}
+                  }
+                } else {
+                  openModal({
+                    title: checkName,
+                    subtitle: checkId,
+                    html: `<div class="muted">No response body.</div><pre style="white-space:pre-wrap; font-size:12px;">${escapeHtml(JSON.stringify(json, null, 2))}</pre>`,
+                  });
+                }
               } else {
-                openModal({
-                  title: checkName,
-                  subtitle: checkId,
-                  html: `<div class="muted">No response body.</div>`,
+                const resp = await fetch('/api/run-check', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ checkId, journeyObserverRoom: journeyObserverRoom || undefined }),
                 });
+                const json = await resp.json().catch(() => null);
+                if (json?.run) {
+                  renderRunDetails(checkName, checkId, json.run);
+                } else {
+                  openModal({
+                    title: checkName,
+                    subtitle: checkId,
+                    html: `<div class="muted">No response body.</div>`,
+                  });
+                }
               }
             } finally {
               btn.disabled = false;
@@ -351,9 +406,30 @@
             if (!checkId) return;
             const checkName = btn.getAttribute('data-name') || 'Check';
             const oldText = btn.textContent || 'Details';
+            const kind = btn.getAttribute('data-details-kind') || '';
+            const instanceId = btn.getAttribute('data-instance') || '';
             btn.disabled = true;
             try {
               btn.textContent = 'Loading...';
+              if (kind === 'push_validate') {
+                let v = null;
+                try { v = localStorage.getItem(`push_validate:lastRun:${instanceId || 'default'}`); } catch {}
+                if (v) {
+                  try {
+                    const parsed = JSON.parse(v);
+                    if (parsed?.run) {
+                      renderRunDetails(parsed.title || checkName, parsed.id || checkId, parsed.run);
+                      return;
+                    }
+                  } catch {}
+                }
+                openModal({
+                  title: checkName,
+                  subtitle: instanceId || '',
+                  html: `<div class="muted">No saved run yet. Click <b>Run</b> to execute the push validation.</div>`,
+                });
+                return;
+              }
               const resp = await fetch(`/api/last-run?checkId=${encodeURIComponent(checkId)}`);
               const json = await resp.json().catch(() => null);
               if (json?.run) {

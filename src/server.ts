@@ -186,7 +186,16 @@ async function main() {
         if (!row) {
           // No data yet -> warn, but never hard-fail instance
           if (!isOptional) hasWarn = true
-          checkOut.push({ id: chk.id, name: chk.name, severity, ok: false, statusCode: null, durationMs: null, errorText: 'no data yet' })
+          checkOut.push({
+            id: chk.id,
+            name: chk.name,
+            type: chk.type,
+            severity,
+            ok: false,
+            statusCode: null,
+            durationMs: null,
+            errorText: 'no data yet',
+          })
           continue
         }
         if (!row.ok) {
