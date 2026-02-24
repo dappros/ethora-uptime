@@ -86,6 +86,40 @@ async function main() {
     return res.json({ checkId, run })
   })
 
+  // Manual action: run push validation once (no uptime.yml / DB check definition needed).
+  // Useful for operators validating push credentials after installing/upgrading.
+  app.post('/api/actions/push-validate', async (req, res) => {
+    const actionId = 'action:push_validate'
+    if (isCheckLocked(actionId)) {
+      return res.status(409).json({ error: 'push validate already running', code: 'CHECK_ALREADY_RUNNING' })
+    }
+
+    const timeoutMs = Math.max(5000, Math.min(180000, Number(req.body?.timeoutMs || 60000)))
+    const startedAt = Date.now()
+
+    const chk: any = {
+      id: actionId,
+      name: 'Push_validate',
+      type: 'push_validate',
+      severity: 'optional',
+      intervalSeconds: 0,
+      timeoutMs,
+    }
+
+    const run = await withCheckLock(actionId, async () => {
+      return await runCheckWithOpts(chk, {})
+    })
+
+    return res.json({
+      actionId,
+      run: {
+        ...run,
+        durationMs: run.durationMs || (Date.now() - startedAt),
+        ts: new Date().toISOString(),
+      },
+    })
+  })
+
   // Fetch last run with full details payload (useful for journeys)
   app.get('/api/last-run', async (req, res) => {
     const checkId = String(req.query.checkId || '').trim()

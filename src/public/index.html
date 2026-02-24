@@ -259,7 +259,10 @@
                 <div class="muted">${inst.id}</div>
                 ${buildLine ? `<div class="muted">${buildLine}</div>` : ``}
               </div>
-              <div class="status"><span class="dot ${statusToClass(inst.status)}"></span>${inst.status.toUpperCase()}</div>
+              <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;">
+                <div class="status"><span class="dot ${statusToClass(inst.status)}"></span>${inst.status.toUpperCase()}</div>
+                <button data-push-test="${escapeHtml(inst.id)}">Run push test</button>
+              </div>
             </div>
             <table>
               <thead><tr><th>Check</th><th>Last</th><th>ms</th></tr></thead>
@@ -327,6 +330,37 @@
                 openModal({
                   title: checkName,
                   subtitle: checkId,
+                  html: `<div class="muted">No response body.</div>`,
+                });
+              }
+            } finally {
+              btn.disabled = false;
+              btn.textContent = oldText;
+              load().catch(() => {});
+            }
+          });
+        });
+
+        // Wire \"Run push test\" buttons (manual action; no config changes required)
+        document.querySelectorAll('button[data-push-test]').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const instanceId = btn.getAttribute('data-push-test') || '';
+            const oldText = btn.textContent || 'Run push test';
+            btn.disabled = true;
+            try {
+              btn.textContent = 'Running...';
+              const resp = await fetch('/api/actions/push-validate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ instanceId }),
+              });
+              const json = await resp.json().catch(() => null);
+              if (json?.run) {
+                renderRunDetails(`Push_validate (${instanceId || 'manual'})`, json.actionId || 'action:push_validate', json.run);
+              } else {
+                openModal({
+                  title: 'Push_validate',
+                  subtitle: instanceId || '',
                   html: `<div class="muted">No response body.</div>`,
                 });
               }
