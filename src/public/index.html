@@ -259,10 +259,7 @@
                 <div class="muted">${inst.id}</div>
                 ${buildLine ? `<div class="muted">${buildLine}</div>` : ``}
               </div>
-              <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;">
-                <div class="status"><span class="dot ${statusToClass(inst.status)}"></span>${inst.status.toUpperCase()}</div>
-                <button data-push-test="${escapeHtml(inst.id)}">Run push test</button>
-              </div>
+              <div class="status"><span class="dot ${statusToClass(inst.status)}"></span>${inst.status.toUpperCase()}</div>
             </div>
             <table>
               <thead><tr><th>Check</th><th>Last</th><th>ms</th></tr></thead>
@@ -288,7 +285,8 @@
                         <td>${c.ok ? 'OK' : ('FAIL' + (c.errorText ? ' ('+c.errorText+')' : ''))}${c.statusCode ? ' ('+c.statusCode+')' : ''}</td>
                         <td>${c.durationMs ?? ''}</td>
                         <td style="text-align:right; white-space:nowrap;">
-                          ${c.type === 'journey' ? `<button data-run="${c.id}" data-name="${escapeHtml(c.name)}">Run</button>` : ''}
+                          ${c.type === 'journey' ? `<button data-run="${c.id}" data-run-kind="journey" data-name="${escapeHtml(c.name)}">Run</button>` : ''}
+                          ${c.type === 'push_validate' ? `<button data-run="${c.id}" data-run-kind="push_validate" data-name="${escapeHtml(c.name)}">Run</button>` : ''}
                           <button data-details="${c.id}" data-name="${escapeHtml(c.name)}">Details</button>
                         </td>
                       </tr>
@@ -313,15 +311,20 @@
             if (!checkId) return;
             const checkName = btn.getAttribute('data-name') || 'Journey';
             const oldText = btn.textContent || 'Run';
-            const journeyObserverRoom = await askJourneyObserverRoom(checkName);
-            if (journeyObserverRoom === null) return;
+            const kind = btn.getAttribute('data-run-kind') || '';
+            let journeyObserverRoom = '';
+            if (kind === 'journey') {
+              const v = await askJourneyObserverRoom(checkName);
+              if (v === null) return;
+              journeyObserverRoom = v || '';
+            }
             btn.disabled = true;
             try {
               btn.textContent = 'Running...';
               const resp = await fetch('/api/run-check', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ checkId, journeyObserverRoom }),
+                body: JSON.stringify({ checkId, journeyObserverRoom: journeyObserverRoom || undefined }),
               });
               const json = await resp.json().catch(() => null);
               if (json?.run) {
@@ -330,37 +333,6 @@
                 openModal({
                   title: checkName,
                   subtitle: checkId,
-                  html: `<div class="muted">No response body.</div>`,
-                });
-              }
-            } finally {
-              btn.disabled = false;
-              btn.textContent = oldText;
-              load().catch(() => {});
-            }
-          });
-        });
-
-        // Wire \"Run push test\" buttons (manual action; no config changes required)
-        document.querySelectorAll('button[data-push-test]').forEach((btn) => {
-          btn.addEventListener('click', async () => {
-            const instanceId = btn.getAttribute('data-push-test') || '';
-            const oldText = btn.textContent || 'Run push test';
-            btn.disabled = true;
-            try {
-              btn.textContent = 'Running...';
-              const resp = await fetch('/api/actions/push-validate', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ instanceId }),
-              });
-              const json = await resp.json().catch(() => null);
-              if (json?.run) {
-                renderRunDetails(`Push_validate (${instanceId || 'manual'})`, json.actionId || 'action:push_validate', json.run);
-              } else {
-                openModal({
-                  title: 'Push_validate',
-                  subtitle: instanceId || '',
                   html: `<div class="muted">No response body.</div>`,
                 });
               }
