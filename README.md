@@ -79,6 +79,15 @@ Advanced mode requires XMPP websocket connectivity to validate message delivery:
 - `ETHORA_XMPP_HOST` (e.g. `localhost` or your XMPP domain)
 - `ETHORA_XMPP_MUC_SERVICE` (optional; defaults to `conference.<XMPP_HOST>`)
 
+## Push validation check (optional)
+
+There is an optional check type:
+
+- `type: push_validate`
+
+It logs into the Ethora API using the same env vars as journeys (`ETHORA_API_BASE`, `ETHORA_BASE_DOMAIN_NAME`, `ETHORA_ADMIN_EMAIL`, `ETHORA_ADMIN_PASSWORD`)
+and calls `POST /v1/push/validate/{appId}` to perform a Firebase **dry-run** validation.
+
 ## Operator observer room (watch journeys live)
 
 By default, journey runs create their own temporary chats and operate there (so membership/removal tests are isolated).

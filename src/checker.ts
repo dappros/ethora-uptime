@@ -38,10 +38,113 @@ export async function runCheckWithOpts(check: CheckConfig, opts: RunCheckOpts = 
   if (check.type === 'journey') {
     return await runJourneyCheck(check, opts)
   }
+  if (check.type === 'push_validate') {
+    return await runPushValidateCheck(check)
+  }
   if (check.type === 'xmpp_muc_echo') {
     return await runXmppMucEchoCheck(check)
   }
   return { ok: false, durationMs: 0, errorText: `Unknown check type: ${(check as any).type}` }
+}
+
+function mustEnv(name: string) {
+  const v = process.env[name]
+  const s = typeof v === 'string' ? v.trim() : ''
+  if (!s) throw new Error(`Missing env: ${name}`)
+  return s
+}
+
+async function httpJson(method: 'GET' | 'POST', url: string, headers: Record<string, string>, body?: any, timeoutMs = 10000) {
+  const controller = new AbortController()
+  const t = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const resp = await fetch(url, {
+      method,
+      headers: { ...(headers || {}), ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}) },
+      body: method === 'POST' ? JSON.stringify(body || {}) : undefined,
+      signal: controller.signal,
+    })
+    const text = await resp.text()
+    let json: any = null
+    try {
+      json = text ? JSON.parse(text) : null
+    } catch {
+      json = null
+    }
+    return { resp, text, json }
+  } finally {
+    clearTimeout(t)
+  }
+}
+
+async function runPushValidateCheck(_check: CheckConfig): Promise<CheckRunResult> {
+  const start = nowMs()
+  try {
+    const apiBase = mustEnv('ETHORA_API_BASE').replace(/\/$/, '')
+    const baseDomainName = mustEnv('ETHORA_BASE_DOMAIN_NAME')
+    const adminEmail = mustEnv('ETHORA_ADMIN_EMAIL')
+    const adminPassword = mustEnv('ETHORA_ADMIN_PASSWORD')
+
+    // 1) get-config (for base app token + app id)
+    const cfg = await httpJson(
+      'GET',
+      `${apiBase}/v1/apps/get-config?domainName=${encodeURIComponent(baseDomainName)}`,
+      {},
+      undefined,
+      10000
+    )
+    if (!cfg.resp.ok) {
+      return { ok: false, statusCode: cfg.resp.status, durationMs: nowMs() - start, errorText: `get-config failed: ${cfg.resp.status}` }
+    }
+    const baseAppObj = cfg.json?.app || cfg.json?.result?.app || cfg.json?.result || cfg.json
+    const appId = String(baseAppObj?._id || baseAppObj?.id || '').trim()
+    const appToken =
+      cfg.json?.appToken ||
+      cfg.json?.app?.appToken ||
+      cfg.json?.result?.appToken ||
+      cfg.json?.result?.app?.appToken
+    if (!appId || !appToken) {
+      return { ok: false, durationMs: nowMs() - start, errorText: 'get-config missing appId/appToken' }
+    }
+
+    // 2) login as admin to get a user bearer token
+    const login = await httpJson(
+      'POST',
+      `${apiBase}/v1/users/login-with-email`,
+      { Authorization: String(appToken) },
+      { email: adminEmail, password: adminPassword },
+      15000
+    )
+    if (!login.resp.ok) {
+      return { ok: false, statusCode: login.resp.status, durationMs: nowMs() - start, errorText: `login failed: ${login.resp.status}` }
+    }
+    const userToken = String(login.json?.token || '').trim()
+    if (!userToken) {
+      return { ok: false, durationMs: nowMs() - start, errorText: 'login missing token' }
+    }
+
+    // 3) validate push (dry-run)
+    const val = await httpJson(
+      'POST',
+      `${apiBase}/v1/push/validate/${encodeURIComponent(appId)}`,
+      { Authorization: `Bearer ${userToken}` },
+      {},
+      30000
+    )
+    const ok = Boolean(val.resp.ok && (val.json?.ok === true || val.json?.pong === true || val.json?.success === true || val.json?.dryRun === true))
+    return {
+      ok,
+      statusCode: val.resp.status,
+      durationMs: nowMs() - start,
+      errorText: ok ? undefined : (val.json?.error || `push validate failed: ${val.resp.status}`),
+      details: { response: val.json ?? val.text ?? null },
+    }
+  } catch (e: any) {
+    if (String(e?.message || '').startsWith('Missing env:')) {
+      return { ok: false, durationMs: nowMs() - start, errorText: `skipped: ${e.message}` }
+    }
+    return { ok: false, durationMs: nowMs() - start, errorText: e?.message || String(e) }
+  }
 }
 
 async function runHttpCheck(check: CheckConfig): Promise<CheckRunResult> {
