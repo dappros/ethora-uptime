@@ -277,6 +277,24 @@ async function runJourneyCheck(check: CheckConfig, opts: RunCheckOpts): Promise<
   }
 }
 
+async function getBaseAppId(timeoutMs: number): Promise<string> {
+  const apiBase = envStr('ETHORA_API_BASE', '').replace(/\/$/, '')
+  const baseDomainName = envStr('ETHORA_BASE_DOMAIN_NAME', '')
+  if (!apiBase || !baseDomainName) return ''
+
+  const cfg = await httpJson(
+    'GET',
+    `${apiBase}/v1/apps/get-config?domainName=${encodeURIComponent(baseDomainName)}`,
+    {},
+    undefined,
+    timeoutMs
+  )
+  if (!cfg.resp.ok) return ''
+
+  const baseAppObj = cfg.json?.app || cfg.json?.result?.app || cfg.json?.result || cfg.json
+  return String(baseAppObj?._id || baseAppObj?.id || '').trim()
+}
+
 function envStr(name: string, def = ''): string {
   const v = process.env[name]
   if (typeof v !== 'string') return def
@@ -450,16 +468,22 @@ async function runXmppMucEchoCheck(check: CheckConfig): Promise<CheckRunResult> 
     return { ok: false, durationMs: nowMs() - start, errorText: 'skipped: Missing env: ETHORA_XMPP_ADMIN_PASSWORD' }
   }
 
-  const user1 = envStr('ETHORA_XMPP_HEALTH_USER1', 'uptime_health_u1')
-  const user2 = envStr('ETHORA_XMPP_HEALTH_USER2', 'uptime_health_u2')
+  const baseAppId = await getBaseAppId(Math.min(10000, timeoutMs))
+  const user1Default = baseAppId ? `${baseAppId}_000000000000000000000001` : 'uptimehealthu1'
+  const user2Default = baseAppId ? `${baseAppId}_000000000000000000000002` : 'uptimehealthu2'
+  const roomDefault = baseAppId ? `${baseAppId}_00000000000000000000000a` : 'uptimehealthroom'
+
+  const user1 = envStr('ETHORA_XMPP_HEALTH_USER1', user1Default)
+  const user2 = envStr('ETHORA_XMPP_HEALTH_USER2', user2Default)
   const pass1 = envStr('ETHORA_XMPP_HEALTH_PASS1', derivePassword(adminPassword, 'u1'))
   const pass2 = envStr('ETHORA_XMPP_HEALTH_PASS2', derivePassword(adminPassword, 'u2'))
-  const roomName = envStr('ETHORA_XMPP_HEALTH_ROOM', 'uptime_health_room')
+  const roomName = envStr('ETHORA_XMPP_HEALTH_ROOM', roomDefault)
 
   const roomJid = `${roomName}@${mucService}`
   const marker = `uptime:${Date.now()}:${crypto.randomBytes(6).toString('hex')}`
 
   const details: Record<string, any> = {
+    baseAppId,
     roomJid,
     user1,
     user2,
