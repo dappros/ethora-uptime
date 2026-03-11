@@ -526,12 +526,19 @@ async function runXmppMucEchoCheck(check: CheckConfig): Promise<CheckRunResult> 
       attempt.user1Ensure = await ensureXmppUser(apiUrl, xmppHost, admin, adminPassword, candidate.user1, pass1, userOpTimeout)
       attempt.user2Ensure = await ensureXmppUser(apiUrl, xmppHost, admin, adminPassword, candidate.user2, pass2, userOpTimeout)
 
-      await ejabberdPostJson(apiUrl, xmppHost, admin, adminPassword, '/destroy_room', { name: candidate.roomName, service: mucService }, Math.min(8000, timeoutMs))
+      if (candidate.strategy !== 'legacy_fallback') {
+        await ejabberdPostJson(apiUrl, xmppHost, admin, adminPassword, '/destroy_room', { name: candidate.roomName, service: mucService }, Math.min(8000, timeoutMs))
 
-      const adminLocal = String(admin || adminDefault).split('@')[0] || 'admin'
-      const adminJoinTimeout = Math.min(10000, timeoutMs)
-      adminXmpp = await joinRoomByWs(serviceUrl, xmppHost, adminLocal, adminPassword, roomJid, adminJoinTimeout, 'admin_join_create_room')
-      attempt.roomCreate = { ok: true, via: 'xmpp_join_as_admin', adminLocal }
+        const adminLocal = String(admin || adminDefault).split('@')[0] || 'admin'
+        const adminJoinTimeout = Math.min(10000, timeoutMs)
+        adminXmpp = await joinRoomByWs(serviceUrl, xmppHost, adminLocal, adminPassword, roomJid, adminJoinTimeout, 'admin_join_create_room')
+        attempt.roomCreate = { ok: true, via: 'xmpp_join_as_admin', adminLocal }
+      } else {
+        // Legacy fallback is intended to reuse the historically working
+        // pre-provisioned room/users. Avoid destroying the room because
+        // recreating it requires the admin cross-app bypass path.
+        attempt.roomCreate = { ok: true, via: 'reuse_existing_room' }
+      }
 
       const joinTimeout = Math.min(10000, timeoutMs)
       xmpp2 = await joinRoomByWs(serviceUrl, xmppHost, candidate.user2, pass2, roomJid, joinTimeout, 'user2_join')
