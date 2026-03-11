@@ -469,107 +469,122 @@ async function runXmppMucEchoCheck(check: CheckConfig): Promise<CheckRunResult> 
   }
 
   const baseAppId = await getBaseAppId(Math.min(10000, timeoutMs))
-  const user1Default = baseAppId ? `${baseAppId}_000000000000000000000001` : 'uptimehealthu1'
-  const user2Default = baseAppId ? `${baseAppId}_000000000000000000000002` : 'uptimehealthu2'
-  const roomDefault = baseAppId ? `${baseAppId}_00000000000000000000000a` : 'uptimehealthroom'
+  const legacyUser1 = 'uptime_health_u1'
+  const legacyUser2 = 'uptime_health_u2'
+  const legacyRoom = 'uptime_health_room'
+  const appScopedUser1 = baseAppId ? `${baseAppId}_000000000000000000000001` : legacyUser1
+  const appScopedUser2 = baseAppId ? `${baseAppId}_000000000000000000000002` : legacyUser2
+  const appScopedRoom = baseAppId ? `${baseAppId}_00000000000000000000000a` : legacyRoom
 
-  const user1 = envStr('ETHORA_XMPP_HEALTH_USER1', user1Default)
-  const user2 = envStr('ETHORA_XMPP_HEALTH_USER2', user2Default)
+  const explicitUser1 = envStr('ETHORA_XMPP_HEALTH_USER1', '')
+  const explicitUser2 = envStr('ETHORA_XMPP_HEALTH_USER2', '')
+  const explicitRoom = envStr('ETHORA_XMPP_HEALTH_ROOM', '')
+  const hasExplicitHealthOverrides = Boolean(explicitUser1 || explicitUser2 || explicitRoom)
+
+  const primaryUser1 = explicitUser1 || appScopedUser1
+  const primaryUser2 = explicitUser2 || appScopedUser2
+  const primaryRoom = explicitRoom || appScopedRoom
   const pass1 = envStr('ETHORA_XMPP_HEALTH_PASS1', derivePassword(adminPassword, 'u1'))
   const pass2 = envStr('ETHORA_XMPP_HEALTH_PASS2', derivePassword(adminPassword, 'u2'))
-  const roomName = envStr('ETHORA_XMPP_HEALTH_ROOM', roomDefault)
-
-  const roomJid = `${roomName}@${mucService}`
-  const marker = `uptime:${Date.now()}:${crypto.randomBytes(6).toString('hex')}`
+  const candidates = [
+    { strategy: baseAppId ? 'app_scoped' : 'legacy', user1: primaryUser1, user2: primaryUser2, roomName: primaryRoom },
+  ]
+  if (!hasExplicitHealthOverrides && baseAppId) {
+    candidates.push({ strategy: 'legacy_fallback', user1: legacyUser1, user2: legacyUser2, roomName: legacyRoom })
+  }
 
   const details: Record<string, any> = {
     baseAppId,
-    roomJid,
-    user1,
-    user2,
     serviceUrl,
     apiUrl,
+    attempts: [],
   }
 
-  let adminXmpp: any = undefined
-  let xmpp1: any = undefined
-  let xmpp2: any = undefined
-  let messageHandler: any = undefined
+  let lastError = ''
+  for (const candidate of candidates) {
+    const roomJid = `${candidate.roomName}@${mucService}`
+    const marker = `uptime:${Date.now()}:${crypto.randomBytes(6).toString('hex')}`
+    const attempt: Record<string, any> = {
+      strategy: candidate.strategy,
+      roomJid,
+      user1: candidate.user1,
+      user2: candidate.user2,
+    }
+    details.attempts.push(attempt)
+    details.roomJid = roomJid
+    details.user1 = candidate.user1
+    details.user2 = candidate.user2
+    details.strategy = candidate.strategy
 
-  try {
-    // Ensure users exist with the expected password.
-    // IMPORTANT:
-    // Do NOT unregister users on each run. If a previous run is still connected (or a job overlaps),
-    // unregistering will kick the active session with a stream error like: "conflict - User removed".
-    const userOpTimeout = Math.min(6000, timeoutMs)
-    details.user1Ensure = await ensureXmppUser(apiUrl, xmppHost, admin, adminPassword, user1, pass1, userOpTimeout)
-    details.user2Ensure = await ensureXmppUser(apiUrl, xmppHost, admin, adminPassword, user2, pass2, userOpTimeout)
+    let adminXmpp: any = undefined
+    let xmpp1: any = undefined
+    let xmpp2: any = undefined
+    let messageHandler: any = undefined
 
-    // Ensure room exists.
-    //
-    // IMPORTANT (2026-01):
-    // We do NOT use ejabberd HTTP API `create_room_with_opts` here because it can return a generic
-    // `{error,"Database error"}` depending on ejabberd internals/module versions.
-    //
-    // Instead we create the room the same way the backend does: join it as the admin XMPP user.
-    // This respects our product policy (clients cannot create rooms by joining; only admin can).
-    await ejabberdPostJson(apiUrl, xmppHost, admin, adminPassword, '/destroy_room', { name: roomName, service: mucService }, Math.min(8000, timeoutMs))
+    try {
+      const userOpTimeout = Math.min(6000, timeoutMs)
+      attempt.user1Ensure = await ensureXmppUser(apiUrl, xmppHost, admin, adminPassword, candidate.user1, pass1, userOpTimeout)
+      attempt.user2Ensure = await ensureXmppUser(apiUrl, xmppHost, admin, adminPassword, candidate.user2, pass2, userOpTimeout)
 
-    const adminLocal = String(admin || adminDefault).split('@')[0] || 'admin'
-    const adminJoinTimeout = Math.min(10000, timeoutMs)
-    // Keep the admin session connected until user1/user2 are in the room.
-    // Otherwise, if the room isn't persistent for any reason, it can disappear between joins and users
-    // will get: "Room creation is denied by service policy".
-    adminXmpp = await joinRoomByWs(serviceUrl, xmppHost, adminLocal, adminPassword, roomJid, adminJoinTimeout, 'admin_join_create_room')
-    details.roomCreate = { ok: true, via: 'xmpp_join_as_admin', adminLocal }
+      await ejabberdPostJson(apiUrl, xmppHost, admin, adminPassword, '/destroy_room', { name: candidate.roomName, service: mucService }, Math.min(8000, timeoutMs))
 
-    // Join room as user2 and listen for the marker message.
-    const joinTimeout = Math.min(10000, timeoutMs)
-    xmpp2 = await joinRoomByWs(serviceUrl, xmppHost, user2, pass2, roomJid, joinTimeout, 'user2_join')
+      const adminLocal = String(admin || adminDefault).split('@')[0] || 'admin'
+      const adminJoinTimeout = Math.min(10000, timeoutMs)
+      adminXmpp = await joinRoomByWs(serviceUrl, xmppHost, adminLocal, adminPassword, roomJid, adminJoinTimeout, 'admin_join_create_room')
+      attempt.roomCreate = { ok: true, via: 'xmpp_join_as_admin', adminLocal }
 
-    let received = false
-    const receivedPromise = new Promise<void>((resolve, reject) => {
-      messageHandler = (stanza: any) => {
-        try {
-          if (!stanza?.is?.('message')) return
-          if (stanza.attrs?.type !== 'groupchat') return
-          if ((stanza.attrs?.from || '').split('/')[0] !== roomJid) return
-          const body = stanza.getChildText?.('body') || ''
-          if (body === marker) {
-            received = true
-            resolve()
+      const joinTimeout = Math.min(10000, timeoutMs)
+      xmpp2 = await joinRoomByWs(serviceUrl, xmppHost, candidate.user2, pass2, roomJid, joinTimeout, 'user2_join')
+
+      let received = false
+      const receivedPromise = new Promise<void>((resolve, reject) => {
+        messageHandler = (stanza: any) => {
+          try {
+            if (!stanza?.is?.('message')) return
+            if (stanza.attrs?.type !== 'groupchat') return
+            if ((stanza.attrs?.from || '').split('/')[0] !== roomJid) return
+            const body = stanza.getChildText?.('body') || ''
+            if (body === marker) {
+              received = true
+              resolve()
+            }
+          } catch (e) {
+            reject(e)
           }
-        } catch (e) {
-          reject(e)
         }
+        xmpp2.on('stanza', messageHandler)
+      })
+
+      xmpp1 = await joinRoomByWs(serviceUrl, xmppHost, candidate.user1, pass1, roomJid, joinTimeout, 'user1_join')
+      const msg = xml('message', { to: roomJid, type: 'groupchat', id: `uptime-${Date.now()}` }, xml('body', {}, marker))
+      xmpp1.send(msg)
+
+      await Promise.race([
+        receivedPromise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('XMPP_ECHO_TIMEOUT')), Math.min(7000, timeoutMs))),
+      ])
+
+      details.received = received
+      attempt.received = received
+      return { ok: true, durationMs: nowMs() - start, details }
+    } catch (e: any) {
+      lastError = e?.message || String(e)
+      attempt.error = lastError
+      details.received = false
+      if (!(candidate.strategy === 'app_scoped' && lastError.includes('XMPP_REGISTER_FAILED') && !hasExplicitHealthOverrides)) {
+        details.error = lastError
+        return { ok: false, durationMs: nowMs() - start, errorText: details.error, details }
       }
-      xmpp2.on('stanza', messageHandler)
-    })
-
-    // Join room as user1 and send message.
-    xmpp1 = await joinRoomByWs(serviceUrl, xmppHost, user1, pass1, roomJid, joinTimeout, 'user1_join')
-    const msg = xml('message', { to: roomJid, type: 'groupchat', id: `uptime-${Date.now()}` }, xml('body', {}, marker))
-    xmpp1.send(msg)
-
-    // Await receipt.
-    await Promise.race([
-      receivedPromise,
-      new Promise((_, reject) => setTimeout(() => reject(new Error('XMPP_ECHO_TIMEOUT')), Math.min(7000, timeoutMs))),
-    ])
-
-    details.received = received
-    return { ok: true, durationMs: nowMs() - start, details }
-  } catch (e: any) {
-    details.received = false
-    details.error = e?.message || String(e)
-    return { ok: false, durationMs: nowMs() - start, errorText: details.error, details }
-  } finally {
-    // Always cleanup XMPP clients to avoid overlapping runs and "conflict - User removed" errors.
-    try { if (xmpp2 && messageHandler) xmpp2.off('stanza', messageHandler) } catch {}
-    try { if (adminXmpp) await adminXmpp.stop() } catch {}
-    try { if (xmpp1) await xmpp1.stop() } catch {}
-    try { if (xmpp2) await xmpp2.stop() } catch {}
+    } finally {
+      try { if (xmpp2 && messageHandler) xmpp2.off('stanza', messageHandler) } catch {}
+      try { if (adminXmpp) await adminXmpp.stop() } catch {}
+      try { if (xmpp1) await xmpp1.stop() } catch {}
+      try { if (xmpp2) await xmpp2.stop() } catch {}
+    }
   }
+
+  details.error = lastError || 'XMPP_ECHO_FAILED'
+  return { ok: false, durationMs: nowMs() - start, errorText: details.error, details }
 }
 
 function getJsonPath(obj: any, path: string): any {
