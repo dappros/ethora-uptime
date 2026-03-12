@@ -361,6 +361,24 @@ async function ejabberdPostJson(apiUrl: string, httpHost: string, admin: string,
   })
 }
 
+function isWrongAppNameError(error: any): boolean {
+  const msg = String(error?.message || error || '')
+  return msg.includes('wrong app name')
+}
+
+async function ejabberdRoomExists(apiUrl: string, httpHost: string, admin: string, adminPassword: string, roomName: string, mucService: string, timeoutMs: number) {
+  const resp = await ejabberdPostJson(
+    apiUrl,
+    httpHost,
+    admin,
+    adminPassword,
+    '/get_room_options',
+    { name: roomName, service: mucService },
+    timeoutMs
+  )
+  return resp.ok
+}
+
 function derivePassword(seed: string, tag: string): string {
   // Deterministic, so operators don't have to store extra secrets in uptime.env.
   return crypto.createHash('sha256').update(`${seed}:${tag}`).digest('hex').slice(0, 20)
@@ -531,8 +549,16 @@ async function runXmppMucEchoCheck(check: CheckConfig): Promise<CheckRunResult> 
 
         const adminLocal = String(admin || adminDefault).split('@')[0] || 'admin'
         const adminJoinTimeout = Math.min(10000, timeoutMs)
-        adminXmpp = await joinRoomByWs(serviceUrl, xmppHost, adminLocal, adminPassword, roomJid, adminJoinTimeout, 'admin_join_create_room')
-        attempt.roomCreate = { ok: true, via: 'xmpp_join_as_admin', adminLocal }
+        try {
+          adminXmpp = await joinRoomByWs(serviceUrl, xmppHost, adminLocal, adminPassword, roomJid, adminJoinTimeout, 'admin_join_create_room')
+          attempt.roomCreate = { ok: true, via: 'xmpp_join_as_admin', adminLocal }
+        } catch (roomError: any) {
+          if (isWrongAppNameError(roomError) && await ejabberdRoomExists(apiUrl, xmppHost, admin, adminPassword, candidate.roomName, mucService, Math.min(5000, timeoutMs))) {
+            attempt.roomCreate = { ok: true, via: 'room_exists_after_admin_error', adminLocal }
+          } else {
+            throw roomError
+          }
+        }
       } else {
         // Legacy fallback is intended to reuse the historically working
         // pre-provisioned room/users. Avoid destroying the room because
