@@ -64,6 +64,7 @@ There are two supported journey levels (configured via `checks[].id`):
 
 - `journey` → basic flow (app + users + 1 chat + add member)
 - `journey_advanced` → comprehensive flow (2 chats, membership changes, XMPP delivery, file upload)
+- `journey_b2b` → tenant/B2B admin flow (create app, app token, users, chat, membership changes, cleanup)
 
 ### Required env for **basic** journey
 
@@ -83,6 +84,20 @@ Advanced mode requires XMPP websocket connectivity to validate message delivery:
 - `ETHORA_XMPP_SERVICE` (e.g. `ws://xmpp:5280/ws`)
 - `ETHORA_XMPP_HOST` (e.g. `localhost` or your XMPP domain)
 - `ETHORA_XMPP_MUC_SERVICE` (optional; defaults to `conference.<XMPP_HOST>`)
+
+### Additional env for **B2B** journey
+
+The B2B journey signs a server token locally and exercises the tenant/admin API surface:
+
+- `ETHORA_B2B_APP_ID`
+- `ETHORA_B2B_APP_SECRET`
+
+Compatibility fallback:
+
+- `ETHORA_CHAT_APP_ID`
+- `ETHORA_CHAT_APP_SECRET`
+
+if the `ETHORA_B2B_*` variables are not set.
 
 ## Push validation check (optional)
 

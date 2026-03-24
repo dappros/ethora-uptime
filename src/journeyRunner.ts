@@ -11,7 +11,7 @@ export type JourneyEnv = {
   usersCount: number
 }
 
-type JourneyMode = 'basic' | 'advanced'
+type JourneyMode = 'basic' | 'advanced' | 'b2b'
 
 type JourneyOptions = {
   mode?: string
@@ -72,11 +72,26 @@ function getXmppEnvFromProcess(): XmppEnv {
   return { serviceUrl, host, mucService }
 }
 
+type B2BEnv = {
+  appId: string
+  appSecret: string
+}
+
+function getB2BEnvFromProcess(): B2BEnv {
+  const appId = process.env.ETHORA_B2B_APP_ID || process.env.ETHORA_CHAT_APP_ID
+  const appSecret = process.env.ETHORA_B2B_APP_SECRET || process.env.ETHORA_CHAT_APP_SECRET
+  return {
+    appId: must(appId, 'ETHORA_B2B_APP_ID'),
+    appSecret: must(appSecret, 'ETHORA_B2B_APP_SECRET'),
+  }
+}
+
 function resolveMode(env: JourneyEnv, opts?: JourneyOptions): JourneyMode {
   const candidates = [opts?.mode, process.env.ETHORA_JOURNEY_MODE]
     .filter(Boolean)
     .map((s) => String(s).toLowerCase())
   const value = candidates.find(Boolean) || 'basic'
+  if (value.includes('b2b') || value.includes('server')) return 'b2b'
   if (value.includes('advanced') || value.includes('comprehensive')) return 'advanced'
   return 'basic'
 }
@@ -104,8 +119,45 @@ async function httpJson(method: string, url: string, headers: Record<string, str
   return { resp, json, text }
 }
 
+function base64url(input: Buffer | string) {
+  return Buffer.from(input).toString('base64url')
+}
+
+function createServerToken(appId: string, appSecret: string, tenantId?: string) {
+  const header = { alg: 'HS256', typ: 'JWT' }
+  const payload: any = { data: { type: 'server', appId: String(appId) } }
+  if (tenantId) payload.data.tenantId = String(tenantId)
+  const encodedHeader = base64url(JSON.stringify(header))
+  const encodedPayload = base64url(JSON.stringify(payload))
+  const data = `${encodedHeader}.${encodedPayload}`
+  const signature = crypto.createHmac('sha256', appSecret).update(data).digest('base64url')
+  return `${data}.${signature}`
+}
+
+function getResultObject(input: any) {
+  return input?.result || input?.app || input
+}
+
+async function pollUserBatchJob(apiBase: string, appId: string, authToken: string, jobId: string, timeoutMs = 120000) {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    const resp = await httpJson(
+      'GET',
+      `${apiBase}/v2/apps/${encodeURIComponent(appId)}/users/batch/${encodeURIComponent(jobId)}`,
+      { Authorization: `Bearer ${authToken}` }
+    )
+    if (!resp.resp.ok) throw new Error(`batch job status failed: ${resp.resp.status} ${resp.text}`)
+    const state = String(resp.json?.state || '')
+    if (state === 'completed') return resp.json
+    if (state === 'failed') throw new Error(`batch job failed: ${resp.json?.error || resp.text}`)
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+  }
+  throw new Error('batch job poll timeout')
+}
+
 export async function runJourney(env: JourneyEnv, opts?: JourneyOptions): Promise<JourneyResult> {
   const mode = resolveMode(env, opts)
+  if (mode === 'b2b') return await runJourneyB2B(env)
   if (mode === 'advanced') return await runJourneyAdvanced(env, opts)
 
   const suffix = randSuffix()
@@ -285,6 +337,240 @@ export async function runJourney(env: JourneyEnv, opts?: JourneyOptions): Promis
       try {
         step('cleanup_delete_app')
         await httpJson('DELETE', `${env.ethoraApiBase}/v1/apps/${encodeURIComponent(String(newAppId))}`, { Authorization: `Bearer ${ownerUserToken}` })
+      } catch {}
+    }
+  }
+}
+
+async function runJourneyB2B(env: JourneyEnv): Promise<JourneyResult> {
+  const suffix = randSuffix()
+  const appDisplayName = `${env.appNamePrefix}-b2b-${suffix}`
+  const details: Record<string, any> = {
+    suffix,
+    appDisplayName,
+    mode: 'b2b',
+    steps: [],
+  }
+
+  const b2b = getB2BEnvFromProcess()
+  const parentServerToken = createServerToken(b2b.appId, b2b.appSecret)
+  const step = (name: string, extra?: any) => details.steps.push({ name, ...extra, ts: new Date().toISOString() })
+
+  let createdAppId: string | null = null
+  let createdChatName: string | null = null
+  const createdUserUuids: string[] = []
+  let createdTokenId: string | null = null
+
+  try {
+    step('create_app_v2')
+    const createAppResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v2/apps`,
+      { Authorization: `Bearer ${parentServerToken}` },
+      { displayName: appDisplayName }
+    )
+    if (!createAppResp.resp.ok) throw new Error(`create app failed: ${createAppResp.resp.status} ${createAppResp.text}`)
+    const createdApp = getResultObject(createAppResp.json?.app ? createAppResp.json : createAppResp.json?.result ? createAppResp.json : createAppResp.json)
+    createdAppId = String(createdApp?._id || createdApp?.id || createAppResp.json?.app?._id || '').trim()
+    if (!createdAppId) throw new Error('create app: missing app id')
+
+    step('list_apps_v2')
+    const listAppsResp = await httpJson(
+      'GET',
+      `${env.ethoraApiBase}/v2/apps?limit=20&offset=0`,
+      { Authorization: `Bearer ${parentServerToken}` }
+    )
+    if (!listAppsResp.resp.ok) throw new Error(`list apps failed: ${listAppsResp.resp.status} ${listAppsResp.text}`)
+
+    step('get_app_v2')
+    const getAppResp = await httpJson(
+      'GET',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}`,
+      { Authorization: `Bearer ${parentServerToken}` }
+    )
+    if (!getAppResp.resp.ok) throw new Error(`get app failed: ${getAppResp.resp.status} ${getAppResp.text}`)
+
+    step('create_app_token_v2')
+    const createTokenResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/tokens`,
+      { Authorization: `Bearer ${parentServerToken}` },
+      { label: `uptime-${suffix}` }
+    )
+    if (!createTokenResp.resp.ok) throw new Error(`create app token failed: ${createTokenResp.resp.status} ${createTokenResp.text}`)
+    createdTokenId = String(createTokenResp.json?.tokenId || '').trim()
+
+    step('list_app_tokens_v2')
+    const listTokensResp = await httpJson(
+      'GET',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/tokens`,
+      { Authorization: `Bearer ${parentServerToken}` }
+    )
+    if (!listTokensResp.resp.ok) throw new Error(`list app tokens failed: ${listTokensResp.resp.status} ${listTokensResp.text}`)
+
+    const user1Uuid = `b2b-${suffix}-u1`
+    const user2Uuid = `b2b-${suffix}-u2`
+    createdUserUuids.push(user1Uuid, user2Uuid)
+
+    step('create_users_batch_v2')
+    const createUsersResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/users/batch`,
+      { Authorization: `Bearer ${parentServerToken}` },
+      {
+        bypassEmailConfirmation: true,
+        usersList: [
+          { uuid: user1Uuid, email: `${user1Uuid}@example.com`, firstName: 'B2B', lastName: 'UserOne', password: `Pass-${suffix}-1` },
+          { uuid: user2Uuid, email: `${user2Uuid}@example.com`, firstName: 'B2B', lastName: 'UserTwo', password: `Pass-${suffix}-2` },
+        ],
+      }
+    )
+    if (createUsersResp.resp.status !== 202) throw new Error(`create users batch failed: ${createUsersResp.resp.status} ${createUsersResp.text}`)
+    const createUsersJobId = String(createUsersResp.json?.jobId || '').trim()
+    if (!createUsersJobId) throw new Error('create users batch: missing jobId')
+
+    step('poll_users_batch_v2', { jobId: createUsersJobId })
+    const batchJob = await pollUserBatchJob(env.ethoraApiBase, createdAppId, parentServerToken, createUsersJobId)
+    const batchResults = Array.isArray(batchJob?.result?.results) ? batchJob.result.results : []
+    if (!batchResults.some((r: any) => ['created', 'exists', 'uuid_exists'].includes(String(r?.status || '')))) {
+      throw new Error('user batch did not create any users')
+    }
+
+    step('create_chat_v2')
+    const createChatResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/chats`,
+      { Authorization: `Bearer ${parentServerToken}` },
+      { title: `b2b-${suffix}`, description: 'uptime synthetic b2b', type: 'public', uuid: `chat-${suffix}` }
+    )
+    if (!createChatResp.resp.ok) throw new Error(`create chat failed: ${createChatResp.resp.status} ${createChatResp.text}`)
+    createdChatName = String(createChatResp.json?.result?.name || createChatResp.json?.result?.jid || '').trim()
+    if (!createdChatName) throw new Error('create chat: missing room name')
+
+    step('patch_chat_v2')
+    const patchChatResp = await httpJson(
+      'PATCH',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/chats/${encodeURIComponent(createdChatName)}`,
+      { Authorization: `Bearer ${parentServerToken}` },
+      { title: `b2b-updated-${suffix}` }
+    )
+    if (!patchChatResp.resp.ok) throw new Error(`patch chat failed: ${patchChatResp.resp.status} ${patchChatResp.text}`)
+
+    step('add_user_to_chat_v2')
+    const addUserResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/chats/users-access`,
+      { Authorization: `Bearer ${parentServerToken}` },
+      { chatName: createdChatName, members: [user2Uuid] }
+    )
+    if (!addUserResp.resp.ok) throw new Error(`add user to chat failed: ${addUserResp.resp.status} ${addUserResp.text}`)
+
+    step('get_user_chats_v2')
+    const getUserChatsResp = await httpJson(
+      'GET',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/users/${encodeURIComponent(user2Uuid)}/chats?limit=20&includeMembers=false`,
+      { Authorization: `Bearer ${parentServerToken}` }
+    )
+    if (!getUserChatsResp.resp.ok) throw new Error(`get user chats failed: ${getUserChatsResp.resp.status} ${getUserChatsResp.text}`)
+
+    step('remove_user_from_chat_v2')
+    const removeUserResp = await httpJson(
+      'DELETE',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/chats/users-access`,
+      { Authorization: `Bearer ${parentServerToken}` },
+      { chatName: createdChatName, members: [user2Uuid] }
+    )
+    if (!removeUserResp.resp.ok) throw new Error(`remove user from chat failed: ${removeUserResp.resp.status} ${removeUserResp.text}`)
+
+    step('delete_users_batch_v2')
+    const deleteUsersResp = await httpJson(
+      'DELETE',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/users/batch`,
+      { Authorization: `Bearer ${parentServerToken}` },
+      { usersIdList: createdUserUuids }
+    )
+    if (!deleteUsersResp.resp.ok) throw new Error(`delete users failed: ${deleteUsersResp.resp.status} ${deleteUsersResp.text}`)
+    createdUserUuids.length = 0
+
+    step('delete_chat_v2')
+    const deleteChatResp = await httpJson(
+      'DELETE',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/chats`,
+      { Authorization: `Bearer ${parentServerToken}` },
+      { name: createdChatName }
+    )
+    if (!deleteChatResp.resp.ok) throw new Error(`delete chat failed: ${deleteChatResp.resp.status} ${deleteChatResp.text}`)
+    createdChatName = null
+
+    if (createdTokenId) {
+      step('delete_app_token_v2')
+      const deleteTokenResp = await httpJson(
+        'DELETE',
+        `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/tokens/${encodeURIComponent(createdTokenId)}`,
+        { Authorization: `Bearer ${parentServerToken}` }
+      )
+      if (!deleteTokenResp.resp.ok) throw new Error(`delete app token failed: ${deleteTokenResp.resp.status} ${deleteTokenResp.text}`)
+      createdTokenId = null
+    }
+
+    step('delete_app_v2')
+    const deleteAppResp = await httpJson(
+      'DELETE',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}`,
+      { Authorization: `Bearer ${parentServerToken}` }
+    )
+    if (!deleteAppResp.resp.ok) throw new Error(`delete app failed: ${deleteAppResp.resp.status} ${deleteAppResp.text}`)
+    createdAppId = null
+
+    step('ok')
+    return { ok: true, details }
+  } catch (e: any) {
+    step('error', { message: e?.message || String(e) })
+    return { ok: false, details: { ...details, error: e?.message || String(e) } }
+  } finally {
+    if (createdChatName && createdAppId) {
+      try {
+        step('cleanup_delete_chat_v2')
+        await httpJson(
+          'DELETE',
+          `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/chats`,
+          { Authorization: `Bearer ${parentServerToken}` },
+          { name: createdChatName }
+        )
+      } catch {}
+    }
+
+    if (createdUserUuids.length && createdAppId) {
+      try {
+        step('cleanup_delete_users_batch_v2')
+        await httpJson(
+          'DELETE',
+          `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/users/batch`,
+          { Authorization: `Bearer ${parentServerToken}` },
+          { usersIdList: createdUserUuids }
+        )
+      } catch {}
+    }
+
+    if (createdTokenId && createdAppId) {
+      try {
+        step('cleanup_delete_app_token_v2')
+        await httpJson(
+          'DELETE',
+          `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/tokens/${encodeURIComponent(createdTokenId)}`,
+          { Authorization: `Bearer ${parentServerToken}` }
+        )
+      } catch {}
+    }
+
+    if (createdAppId) {
+      try {
+        step('cleanup_delete_app_v2')
+        await httpJson(
+          'DELETE',
+          `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}`,
+          { Authorization: `Bearer ${parentServerToken}` }
+        )
       } catch {}
     }
   }

@@ -60,4 +60,13 @@ instances:
         intervalSeconds: 7200
         timeoutMs: 240000
 
+      # Optional: B2B / tenant-admin regression journey (apps + users + chats + memberships)
+      - id: journey_b2b
+        name: Synthetic_journey_b2b
+        type: journey
+        severity: optional
+        enabled: false
+        intervalSeconds: 7200
+        timeoutMs: 240000
+
 
