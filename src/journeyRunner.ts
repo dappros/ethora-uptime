@@ -123,6 +123,10 @@ function base64url(input: Buffer | string) {
   return Buffer.from(input).toString('base64url')
 }
 
+function deriveScopedSecret(secret: string, purpose: string) {
+  return crypto.createHmac('sha256', String(secret)).update(`ethora:${purpose}:v1`).digest('hex')
+}
+
 function createServerToken(appId: string, appSecret: string, tenantId?: string) {
   const header = { alg: 'HS256', typ: 'JWT' }
   const payload: any = { data: { type: 'server', appId: String(appId) } }
@@ -130,7 +134,8 @@ function createServerToken(appId: string, appSecret: string, tenantId?: string) 
   const encodedHeader = base64url(JSON.stringify(header))
   const encodedPayload = base64url(JSON.stringify(payload))
   const data = `${encodedHeader}.${encodedPayload}`
-  const signature = crypto.createHmac('sha256', appSecret).update(data).digest('base64url')
+  const signingSecret = deriveScopedSecret(appSecret, 'server')
+  const signature = crypto.createHmac('sha256', signingSecret).update(data).digest('base64url')
   return `${data}.${signature}`
 }
 
