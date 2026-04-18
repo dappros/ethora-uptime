@@ -36,6 +36,17 @@ export const SYNTHETIC_APP_DISPLAY_NAME_BASIC = '__uptime__journey'
 export const SYNTHETIC_APP_DISPLAY_NAME_ADVANCED = '__uptime__journey_advanced'
 export const SYNTHETIC_APP_DISPLAY_NAME_B2B = '__uptime__journey_b2b'
 
+// Optional manual journeys (enabled: false in uptime.yml; user runs from UI).
+// Each gets its own stable per-mode displayName so concurrent runs of different
+// modes don't collide.
+export const SYNTHETIC_APP_DISPLAY_NAME_PASSWORD_RESET = '__uptime__journey_password_reset'
+export const SYNTHETIC_APP_DISPLAY_NAME_USER_TAGS = '__uptime__journey_user_tags'
+export const SYNTHETIC_APP_DISPLAY_NAME_CHAT_REPORTS = '__uptime__journey_chat_reports'
+export const SYNTHETIC_APP_DISPLAY_NAME_APP_STATS = '__uptime__journey_app_stats'
+export const SYNTHETIC_APP_DISPLAY_NAME_V1_FILES = '__uptime__journey_v1_files'
+export const SYNTHETIC_APP_DISPLAY_NAME_PRIVATE_CHAT = '__uptime__journey_private_chat'
+export const SYNTHETIC_APP_DISPLAY_NAME_V2_USER_CHATS = '__uptime__journey_v2_user_chats'
+
 // Stable header so a server admin can also distinguish these calls in logs/proxy rules.
 const SYNTHETIC_HEADERS: Record<string, string> = { 'x-ethora-synthetic': '1' }
 
@@ -50,7 +61,20 @@ export type JourneyEnv = {
   usersCount: number
 }
 
-type JourneyMode = 'basic' | 'advanced' | 'b2b'
+type JourneyMode =
+  | 'basic'
+  | 'advanced'
+  | 'b2b'
+  // Optional manual journeys (enabled: false by default; run via UI button)
+  | 'token_refresh'
+  | 'signup_validation'
+  | 'password_reset'
+  | 'app_stats'
+  | 'user_tags'
+  | 'chat_reports'
+  | 'v1_files'
+  | 'private_chat'
+  | 'v2_user_chats'
 
 type JourneyOptions = {
   mode?: string
@@ -130,6 +154,17 @@ function resolveMode(env: JourneyEnv, opts?: JourneyOptions): JourneyMode {
     .filter(Boolean)
     .map((s) => String(s).toLowerCase())
   const value = candidates.find(Boolean) || 'basic'
+
+  // Order matters: more specific tokens before generic ones.
+  if (value.includes('token_refresh') || value.includes('token-refresh')) return 'token_refresh'
+  if (value.includes('signup_validation') || value.includes('signup-validation')) return 'signup_validation'
+  if (value.includes('password_reset') || value.includes('password-reset')) return 'password_reset'
+  if (value.includes('app_stats') || value.includes('app-stats')) return 'app_stats'
+  if (value.includes('user_tags') || value.includes('user-tags')) return 'user_tags'
+  if (value.includes('chat_reports') || value.includes('chat-reports')) return 'chat_reports'
+  if (value.includes('v1_files') || value.includes('v1-files')) return 'v1_files'
+  if (value.includes('private_chat') || value.includes('private-chat')) return 'private_chat'
+  if (value.includes('v2_user_chats') || value.includes('v2-user-chats')) return 'v2_user_chats'
   if (value.includes('b2b') || value.includes('server')) return 'b2b'
   if (value.includes('advanced') || value.includes('comprehensive')) return 'advanced'
   return 'basic'
@@ -354,10 +389,705 @@ async function pollUserBatchJob(apiBase: string, appId: string, authToken: strin
   throw new Error('batch job poll timeout')
 }
 
+// ============================================================================
+// Shared synthetic-context helpers (used by the optional manual journeys).
+//
+// Each manual journey needs the same boilerplate — get base config, login admin,
+// orphan-sweep + create the synthetic app, sign up + login N test users — and
+// the same teardown — delete chats/files/sharelinks/users/app. Extracting these
+// helpers keeps each new journey runner ~30-50 lines focused on the actual
+// thing being tested instead of repeating ~100 lines of fixture wiring.
+// ============================================================================
+
+type TestUser = {
+  email: string
+  password: string
+  token: string
+  xmppUsername: string
+  xmppPassword: string
+  id: string
+}
+
+type SyntheticContext = {
+  baseAppToken: string
+  ownerUserToken: string
+  syntheticApp: SyntheticAppRef
+  users: TestUser[]
+  suffix: string
+  // Mutable lists the journey body pushes to as it creates resources.
+  // The teardown helper iterates these in reverse-creation order.
+  chatNames: string[]
+  fileIds: string[]
+  shareTokens: string[]
+}
+
+async function setupSyntheticContext(
+  env: JourneyEnv,
+  appDisplayName: string,
+  usersCount: number,
+  suffix: string,
+  details: Record<string, any>,
+  step: (name: string, extra?: any) => void
+): Promise<SyntheticContext> {
+  step('get_base_app_config')
+  const cfgResp = await httpJson(
+    'GET',
+    `${env.ethoraApiBase}/v1/apps/get-config?domainName=${encodeURIComponent(env.baseDomainName)}`,
+    {}
+  )
+  if (!cfgResp.resp.ok) throw new Error(`get-config failed: ${cfgResp.resp.status} ${cfgResp.text}`)
+  const baseAppToken =
+    cfgResp.json?.appToken ||
+    cfgResp.json?.app?.appToken ||
+    cfgResp.json?.result?.appToken ||
+    cfgResp.json?.result?.app?.appToken
+  if (!baseAppToken) throw new Error('get-config: missing appToken in response')
+
+  step('login_admin_user')
+  const loginResp = await httpJson(
+    'POST',
+    `${env.ethoraApiBase}/v1/users/login-with-email`,
+    { Authorization: String(baseAppToken) },
+    { email: env.adminEmail, password: env.adminPassword }
+  )
+  if (!loginResp.resp.ok) throw new Error(`login-with-email failed: ${loginResp.resp.status} ${loginResp.text}`)
+  const ownerUserToken = String(loginResp.json?.token || '').trim()
+  if (!ownerUserToken) throw new Error('login-with-email: missing token')
+
+  step('prepare_synthetic_app', { displayName: appDisplayName })
+  const syntheticApp = await prepareSyntheticAppV1(env.ethoraApiBase, ownerUserToken, appDisplayName)
+  details.appId = syntheticApp.appId
+  details.orphansCleaned = syntheticApp.orphansCleaned
+  if (syntheticApp.orphansCleaned > 0) {
+    step('cleaned_orphans', { count: syntheticApp.orphansCleaned })
+  }
+  step('create_app', { appId: syntheticApp.appId })
+
+  const users: TestUser[] = []
+  for (let i = 0; i < usersCount; i++) {
+    const email = `uptime-${suffix}-${i}@example.com`
+    const password = `Pass-${suffix}-${i}-Abc123`
+
+    step('signup_user_v2', { i })
+    const signupResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v2/users/sign-up-with-email`,
+      { Authorization: String(syntheticApp.appToken) },
+      { email, firstName: `Uptime${i}`, lastName: `Journey${suffix}`, password, cfToken: '', utm: '' }
+    )
+    if (!signupResp.resp.ok) throw new Error(`signup v2 failed: ${signupResp.resp.status} ${signupResp.text}`)
+
+    step('login_user_v2', { i })
+    const userLoginResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v2/users/login-with-email`,
+      { Authorization: String(syntheticApp.appToken) },
+      { email, password }
+    )
+    if (!userLoginResp.resp.ok) throw new Error(`login v2 failed: ${userLoginResp.resp.status} ${userLoginResp.text}`)
+    const u = userLoginResp.json?.user
+    const t = userLoginResp.json?.token
+    if (!u?._id || !t) throw new Error('login v2: missing user or token')
+    users.push({
+      email,
+      password,
+      token: String(t),
+      xmppUsername: String(u?.xmppUsername || ''),
+      xmppPassword: String(u?.xmppPassword || ''),
+      id: String(u._id),
+    })
+  }
+
+  return {
+    baseAppToken: String(baseAppToken),
+    ownerUserToken,
+    syntheticApp,
+    users,
+    suffix,
+    chatNames: [],
+    fileIds: [],
+    shareTokens: [],
+  }
+}
+
+async function teardownSyntheticContext(
+  env: JourneyEnv,
+  ctx: SyntheticContext | null,
+  details: Record<string, any>,
+  step: (name: string, extra?: any) => void,
+  cleanupErr: (stage: string, e: any) => void
+): Promise<void> {
+  if (!ctx) return
+  const ownerToken = ctx.ownerUserToken
+  const userToken = ctx.users[0]?.token
+
+  // 1) sharelinks (user auth)
+  for (const tok of ctx.shareTokens) {
+    if (!userToken) break
+    try {
+      step('cleanup_delete_sharelink', { token: tok.slice(0, 8) })
+      const r = await httpJson(
+        'DELETE',
+        `${env.ethoraApiBase}/v1/sharelink/${encodeURIComponent(tok)}`,
+        { Authorization: `Bearer ${userToken}` }
+      )
+      if (!r.resp.ok) cleanupErr('delete_sharelink', new Error(`status=${r.resp.status} ${r.text}`))
+    } catch (e) { cleanupErr('delete_sharelink', e) }
+  }
+
+  // 2) files (user auth, v2 first then v1 fallback)
+  for (const fid of ctx.fileIds) {
+    if (!userToken) break
+    try {
+      step('cleanup_delete_file', { fileId: fid })
+      const r = await httpJson(
+        'DELETE',
+        `${env.ethoraApiBase}/v2/files/${encodeURIComponent(fid)}`,
+        { Authorization: `Bearer ${userToken}` }
+      )
+      if (!r.resp.ok && r.resp.status === 404) {
+        const r1 = await httpJson(
+          'DELETE',
+          `${env.ethoraApiBase}/v1/files/${encodeURIComponent(fid)}`,
+          { Authorization: `Bearer ${userToken}` }
+        )
+        if (!r1.resp.ok) cleanupErr('delete_file', new Error(`status=${r1.resp.status} ${r1.text}`))
+      } else if (!r.resp.ok) {
+        cleanupErr('delete_file', new Error(`status=${r.resp.status} ${r.text}`))
+      }
+    } catch (e) { cleanupErr('delete_file', e) }
+  }
+
+  // 3) chats (user auth)
+  for (const name of ctx.chatNames) {
+    if (!userToken) break
+    try {
+      step('cleanup_delete_chat', { chatName: name })
+      const r = await httpJson(
+        'DELETE',
+        `${env.ethoraApiBase}/v1/chats`,
+        { Authorization: `Bearer ${userToken}`, 'Content-Type': 'application/json' },
+        { name }
+      )
+      if (!r.resp.ok) cleanupErr('delete_chat', new Error(`status=${r.resp.status} ${r.text}`))
+    } catch (e) { cleanupErr('delete_chat', e) }
+  }
+
+  // 4) users (admin auth)
+  if (ctx.users.length) {
+    try {
+      step('cleanup_delete_users')
+      const r = await httpJson(
+        'POST',
+        `${env.ethoraApiBase}/v1/users/delete-many-with-app-id/${encodeURIComponent(String(ctx.syntheticApp.appId))}`,
+        { Authorization: `Bearer ${ownerToken}` },
+        { usersIdList: ctx.users.map((u) => u.id) }
+      )
+      if (!r.resp.ok) cleanupErr('delete_users', new Error(`status=${r.resp.status} ${r.text}`))
+    } catch (e) { cleanupErr('delete_users', e) }
+  }
+
+  // 5) app (admin auth) — always last so we have an app context for the
+  // user/chat/file deletes above.
+  try {
+    step('cleanup_delete_app')
+    const r = await httpJson(
+      'DELETE',
+      `${env.ethoraApiBase}/v1/apps/${encodeURIComponent(String(ctx.syntheticApp.appId))}`,
+      { Authorization: `Bearer ${ownerToken}`, ...SYNTHETIC_HEADERS }
+    )
+    if (!r.resp.ok) cleanupErr('delete_app', new Error(`status=${r.resp.status} ${r.text}`))
+  } catch (e) { cleanupErr('delete_app', e) }
+}
+
+function makeManualJourneyShell(mode: string) {
+  const suffix = randSuffix()
+  const details: Record<string, any> = {
+    suffix,
+    mode,
+    steps: [],
+    cleanup: { errors: [] as Array<{ stage: string; message: string }> },
+  }
+  const step = (name: string, extra?: any) => details.steps.push({ name, ...extra, ts: new Date().toISOString() })
+  const cleanupErr = (stage: string, e: any) => {
+    details.cleanup.errors.push({ stage, message: e?.message || String(e) })
+  }
+  return { suffix, details, step, cleanupErr }
+}
+
+// ============================================================================
+// Optional manual journeys (enabled: false in uptime.yml; user runs from UI).
+// Each focuses on a small slice of the API surface that the always-on journeys
+// don't already cover, so an operator can fire them on demand for QA / regression.
+// ============================================================================
+
+// 1) journey_token_refresh — verifies POST /v1/users/login + /login/refresh roundtrip.
+//    Uses the base app and admin credentials (no synthetic app needed).
+async function runJourneyTokenRefresh(env: JourneyEnv): Promise<JourneyResult> {
+  const { suffix: _suffix, details, step } = makeManualJourneyShell('token_refresh')
+  try {
+    step('get_base_app_config')
+    const cfgResp = await httpJson(
+      'GET',
+      `${env.ethoraApiBase}/v1/apps/get-config?domainName=${encodeURIComponent(env.baseDomainName)}`,
+      {}
+    )
+    if (!cfgResp.resp.ok) throw new Error(`get-config failed: ${cfgResp.resp.status} ${cfgResp.text}`)
+    const baseAppToken =
+      cfgResp.json?.appToken ||
+      cfgResp.json?.app?.appToken ||
+      cfgResp.json?.result?.appToken ||
+      cfgResp.json?.result?.app?.appToken
+    if (!baseAppToken) throw new Error('get-config: missing appToken')
+
+    step('login_admin')
+    const loginResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v1/users/login-with-email`,
+      { Authorization: String(baseAppToken) },
+      { email: env.adminEmail, password: env.adminPassword }
+    )
+    if (!loginResp.resp.ok) throw new Error(`login failed: ${loginResp.resp.status} ${loginResp.text}`)
+    const accessToken = String(loginResp.json?.token || '').trim()
+    const refreshToken = String(loginResp.json?.refreshToken || loginResp.json?.refresh_token || '').trim()
+    if (!accessToken) throw new Error('login: missing token')
+    if (!refreshToken) {
+      // Some installs may not issue a refresh token (no rotating-token feature). Treat as skipped.
+      step('skipped', { reason: 'login response missing refreshToken' })
+      details.warning = 'login did not return a refreshToken; backend may not support refresh flow'
+      return { ok: true, details }
+    }
+
+    step('refresh_token')
+    const refreshResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v1/users/login/refresh`,
+      { Authorization: String(baseAppToken) },
+      { refreshToken }
+    )
+    if (!refreshResp.resp.ok) throw new Error(`refresh failed: ${refreshResp.resp.status} ${refreshResp.text}`)
+    const newToken = String(refreshResp.json?.token || refreshResp.json?.accessToken || '').trim()
+    if (!newToken) throw new Error('refresh: missing new token')
+    if (newToken === accessToken) {
+      // Not strictly wrong but suspicious — flag as a warning rather than fail.
+      details.warning = 'refresh returned the same token as login (no rotation observed)'
+    }
+
+    step('verify_new_token_with_me')
+    const meResp = await httpJson(
+      'GET',
+      `${env.ethoraApiBase}/v1/users/me`,
+      { Authorization: `Bearer ${newToken}` }
+    )
+    if (!meResp.resp.ok) throw new Error(`users/me with refreshed token failed: ${meResp.resp.status}`)
+
+    step('ok')
+    return { ok: true, details }
+  } catch (e: any) {
+    details.steps.push({ name: 'error', message: e?.message || String(e), ts: new Date().toISOString() })
+    return { ok: false, details: { ...details, error: e?.message || String(e) } }
+  }
+}
+
+// 2) journey_signup_validation — read-only: check-domain-name + checkEmail.
+async function runJourneySignupValidation(env: JourneyEnv): Promise<JourneyResult> {
+  const { suffix, details, step } = makeManualJourneyShell('signup_validation')
+  try {
+    step('get_base_app_config')
+    const cfgResp = await httpJson(
+      'GET',
+      `${env.ethoraApiBase}/v1/apps/get-config?domainName=${encodeURIComponent(env.baseDomainName)}`,
+      {}
+    )
+    if (!cfgResp.resp.ok) throw new Error(`get-config failed: ${cfgResp.resp.status} ${cfgResp.text}`)
+    const baseAppToken =
+      cfgResp.json?.appToken ||
+      cfgResp.json?.app?.appToken ||
+      cfgResp.json?.result?.appToken ||
+      cfgResp.json?.result?.app?.appToken
+    if (!baseAppToken) throw new Error('get-config: missing appToken')
+
+    // Use a deterministic suffix-based domain name so we always probe a
+    // never-used name (expected: 200 / available).
+    step('check_domain_name')
+    const domainName = `uptimeprobe${suffix}`
+    const dnResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v1/apps/check-domain-name`,
+      { Authorization: String(baseAppToken) },
+      { domainName }
+    )
+    // Backends return 200 with { isAvailable: true } or similar; some may 422 on
+    // reserved names. Either is fine — what we care about is the endpoint responding.
+    if (!(dnResp.resp.ok || dnResp.resp.status === 422)) {
+      throw new Error(`check-domain-name failed: ${dnResp.resp.status} ${dnResp.text}`)
+    }
+    details.checkDomain = { status: dnResp.resp.status, body: dnResp.json }
+
+    step('check_email')
+    const probeEmail = `uptime-probe-${suffix}@example.com`
+    const emResp = await httpJson(
+      'GET',
+      `${env.ethoraApiBase}/v1/users/checkEmail/${encodeURIComponent(probeEmail)}`,
+      {}
+    )
+    if (!(emResp.resp.ok || emResp.resp.status === 422)) {
+      throw new Error(`checkEmail failed: ${emResp.resp.status} ${emResp.text}`)
+    }
+    details.checkEmail = { status: emResp.resp.status, body: emResp.json }
+
+    step('ok')
+    return { ok: true, details }
+  } catch (e: any) {
+    details.steps.push({ name: 'error', message: e?.message || String(e), ts: new Date().toISOString() })
+    return { ok: false, details: { ...details, error: e?.message || String(e) } }
+  }
+}
+
+// 3) journey_password_reset — POST /v1/users/forgot for an existing user, then
+//    POST /v1/users/reset with a deliberately invalid token (expect 4xx).
+//    Avoids consuming the real token (we can't read the email) but still verifies
+//    both endpoints respond and the validation path is wired up.
+async function runJourneyPasswordReset(env: JourneyEnv): Promise<JourneyResult> {
+  const { suffix, details, step, cleanupErr } = makeManualJourneyShell('password_reset')
+  let ctx: SyntheticContext | null = null
+  try {
+    ctx = await setupSyntheticContext(env, SYNTHETIC_APP_DISPLAY_NAME_PASSWORD_RESET, 1, suffix, details, step)
+    const u0 = ctx.users[0]
+
+    step('forgot_password')
+    const forgotResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v1/users/forgot`,
+      { Authorization: String(ctx.syntheticApp.appToken) },
+      { email: u0.email }
+    )
+    // Many backends always return 200 to prevent email-enumeration; some return 404
+    // for unknown emails. Both are fine — we want to ensure no 5xx.
+    if (forgotResp.resp.status >= 500) throw new Error(`forgot failed: ${forgotResp.resp.status} ${forgotResp.text}`)
+    details.forgot = { status: forgotResp.resp.status }
+
+    step('reset_with_bad_token')
+    const badResetResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v1/users/reset`,
+      { Authorization: String(ctx.syntheticApp.appToken) },
+      { token: 'uptime-invalid-token-' + suffix, password: 'NewPass-' + suffix + '-X1' }
+    )
+    // Expect 4xx. 5xx is a real bug, 2xx means the token validation is broken.
+    if (badResetResp.resp.status >= 500) throw new Error(`reset (bad token) returned 5xx: ${badResetResp.resp.status}`)
+    if (badResetResp.resp.ok) throw new Error(`reset accepted an obviously-invalid token (${badResetResp.resp.status})`)
+    details.badReset = { status: badResetResp.resp.status }
+
+    step('ok')
+    return { ok: true, details }
+  } catch (e: any) {
+    details.steps.push({ name: 'error', message: e?.message || String(e), ts: new Date().toISOString() })
+    return { ok: false, details: { ...details, error: e?.message || String(e) } }
+  } finally {
+    await teardownSyntheticContext(env, ctx, details, step, cleanupErr)
+  }
+}
+
+// 4) journey_app_stats — synthetic app + GET /v1/apps/graph-statistic/{appId}.
+//    Catches Mongo aggregation regressions on the admin dashboard data path.
+async function runJourneyAppStats(env: JourneyEnv): Promise<JourneyResult> {
+  const { suffix, details, step, cleanupErr } = makeManualJourneyShell('app_stats')
+  let ctx: SyntheticContext | null = null
+  try {
+    ctx = await setupSyntheticContext(env, SYNTHETIC_APP_DISPLAY_NAME_APP_STATS, 0, suffix, details, step)
+    const appId = String(ctx.syntheticApp.appId)
+
+    step('graph_statistic')
+    const r = await httpJson(
+      'GET',
+      `${env.ethoraApiBase}/v1/apps/graph-statistic/${encodeURIComponent(appId)}`,
+      { Authorization: `Bearer ${ctx.ownerUserToken}` }
+    )
+    if (!r.resp.ok) throw new Error(`graph-statistic failed: ${r.resp.status} ${r.text}`)
+    details.graphStatistic = { keys: Object.keys(r.json || {}).slice(0, 20) }
+
+    // Bonus: GET /v1/apps/{id} as a single-app fetch sanity check.
+    step('get_app')
+    const r2 = await httpJson(
+      'GET',
+      `${env.ethoraApiBase}/v1/apps/${encodeURIComponent(appId)}`,
+      { Authorization: `Bearer ${ctx.ownerUserToken}` }
+    )
+    if (!r2.resp.ok) throw new Error(`get app failed: ${r2.resp.status} ${r2.text}`)
+
+    step('ok')
+    return { ok: true, details }
+  } catch (e: any) {
+    details.steps.push({ name: 'error', message: e?.message || String(e), ts: new Date().toISOString() })
+    return { ok: false, details: { ...details, error: e?.message || String(e) } }
+  } finally {
+    await teardownSyntheticContext(env, ctx, details, step, cleanupErr)
+  }
+}
+
+// 5) journey_user_tags — exercise tags-add / tags-set / tags-delete.
+async function runJourneyUserTags(env: JourneyEnv): Promise<JourneyResult> {
+  const { suffix, details, step, cleanupErr } = makeManualJourneyShell('user_tags')
+  let ctx: SyntheticContext | null = null
+  try {
+    ctx = await setupSyntheticContext(env, SYNTHETIC_APP_DISPLAY_NAME_USER_TAGS, 2, suffix, details, step)
+    const appId = String(ctx.syntheticApp.appId)
+    const userIdList = ctx.users.map((u) => u.id)
+    const tagAdd = `uptime-add-${suffix}`
+    const tagSet = `uptime-set-${suffix}`
+
+    step('tags_add')
+    const r1 = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v1/users/tags-add/${encodeURIComponent(appId)}`,
+      { Authorization: `Bearer ${ctx.ownerUserToken}` },
+      { userIdList, tagsList: [tagAdd] }
+    )
+    if (!r1.resp.ok) throw new Error(`tags-add failed: ${r1.resp.status} ${r1.text}`)
+
+    step('tags_set')
+    const r2 = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v1/users/tags-set/${encodeURIComponent(appId)}`,
+      { Authorization: `Bearer ${ctx.ownerUserToken}` },
+      { userIdList, tagsList: [tagSet] }
+    )
+    if (!r2.resp.ok) throw new Error(`tags-set failed: ${r2.resp.status} ${r2.text}`)
+
+    step('tags_delete')
+    const r3 = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v1/users/tags-delete/${encodeURIComponent(appId)}`,
+      { Authorization: `Bearer ${ctx.ownerUserToken}` },
+      { userIdList, tagsList: [tagSet] }
+    )
+    if (!r3.resp.ok) throw new Error(`tags-delete failed: ${r3.resp.status} ${r3.text}`)
+
+    step('ok')
+    return { ok: true, details }
+  } catch (e: any) {
+    details.steps.push({ name: 'error', message: e?.message || String(e), ts: new Date().toISOString() })
+    return { ok: false, details: { ...details, error: e?.message || String(e) } }
+  } finally {
+    await teardownSyntheticContext(env, ctx, details, step, cleanupErr)
+  }
+}
+
+// 6) journey_chat_reports — public chat + report submission (moderation flow).
+async function runJourneyChatReports(env: JourneyEnv): Promise<JourneyResult> {
+  const { suffix, details, step, cleanupErr } = makeManualJourneyShell('chat_reports')
+  let ctx: SyntheticContext | null = null
+  try {
+    ctx = await setupSyntheticContext(env, SYNTHETIC_APP_DISPLAY_NAME_CHAT_REPORTS, 2, suffix, details, step)
+    const u0 = ctx.users[0]
+    const u1 = ctx.users[1]
+
+    step('create_chat')
+    const createChatResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v1/chats`,
+      { Authorization: `Bearer ${u0.token}` },
+      { title: `report-${suffix}`, description: 'uptime chat reports', type: 'public', uuid: `report-${suffix}`, members: [u1.xmppUsername] }
+    )
+    if (!createChatResp.resp.ok) throw new Error(`create chat failed: ${createChatResp.resp.status} ${createChatResp.text}`)
+    const chatName = String(createChatResp.json?.result?.name || '').trim()
+    if (!chatName) throw new Error('create chat: missing name')
+    ctx.chatNames.push(chatName)
+
+    step('report_chat')
+    const reportResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v1/chats/reports/${encodeURIComponent(chatName)}`,
+      { Authorization: `Bearer ${u1.token}` },
+      { reason: `uptime synthetic report ${suffix}` }
+    )
+    // Some backends return 201, some 200; accept any 2xx.
+    if (!reportResp.resp.ok) throw new Error(`report failed: ${reportResp.resp.status} ${reportResp.text}`)
+
+    step('ok')
+    return { ok: true, details }
+  } catch (e: any) {
+    details.steps.push({ name: 'error', message: e?.message || String(e), ts: new Date().toISOString() })
+    return { ok: false, details: { ...details, error: e?.message || String(e) } }
+  } finally {
+    await teardownSyntheticContext(env, ctx, details, step, cleanupErr)
+  }
+}
+
+// 7) journey_v1_files — full v1 file upload + list + get + delete lifecycle.
+async function runJourneyV1Files(env: JourneyEnv): Promise<JourneyResult> {
+  const { suffix, details, step, cleanupErr } = makeManualJourneyShell('v1_files')
+  let ctx: SyntheticContext | null = null
+  try {
+    ctx = await setupSyntheticContext(env, SYNTHETIC_APP_DISPLAY_NAME_V1_FILES, 1, suffix, details, step)
+    const u0 = ctx.users[0]
+
+    step('upload_v1')
+    const form = new FormData()
+    form.append('files', new Blob([`uptime-v1-file-${suffix}`], { type: 'text/plain' }), `v1-${suffix}.txt`)
+    const upResp = await fetch(`${env.ethoraApiBase}/v1/files/`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${u0.token}` },
+      body: form,
+    })
+    const upText = await upResp.text()
+    if (!upResp.ok) throw new Error(`upload failed: ${upResp.status} ${upText}`)
+    let upJson: any = null
+    try { upJson = upText ? JSON.parse(upText) : null } catch {}
+    const file = upJson?.results?.[0] || upJson?.files?.[0] || upJson?.[0]
+    const fileId = String(file?._id || file?.id || '').trim()
+    if (!fileId) throw new Error('upload: missing file id')
+
+    step('list_v1')
+    const listResp = await httpJson(
+      'GET',
+      `${env.ethoraApiBase}/v1/files/`,
+      { Authorization: `Bearer ${u0.token}` }
+    )
+    if (!listResp.resp.ok) throw new Error(`list failed: ${listResp.resp.status} ${listResp.text}`)
+
+    step('get_v1')
+    const getResp = await httpJson(
+      'GET',
+      `${env.ethoraApiBase}/v1/files/${encodeURIComponent(fileId)}`,
+      { Authorization: `Bearer ${u0.token}` }
+    )
+    if (!getResp.resp.ok) throw new Error(`get failed: ${getResp.resp.status} ${getResp.text}`)
+
+    step('delete_v1')
+    const delResp = await httpJson(
+      'DELETE',
+      `${env.ethoraApiBase}/v1/files/${encodeURIComponent(fileId)}`,
+      { Authorization: `Bearer ${u0.token}` }
+    )
+    if (!delResp.resp.ok) {
+      // Don't hard-fail if delete is unsupported — push to teardown which will retry.
+      ctx.fileIds.push(fileId)
+      throw new Error(`delete failed: ${delResp.resp.status} ${delResp.text}`)
+    }
+
+    step('ok')
+    return { ok: true, details }
+  } catch (e: any) {
+    details.steps.push({ name: 'error', message: e?.message || String(e), ts: new Date().toISOString() })
+    return { ok: false, details: { ...details, error: e?.message || String(e) } }
+  } finally {
+    await teardownSyntheticContext(env, ctx, details, step, cleanupErr)
+  }
+}
+
+// 8) journey_private_chat — POST /v1/chats/private + delete.
+async function runJourneyPrivateChat(env: JourneyEnv): Promise<JourneyResult> {
+  const { suffix, details, step, cleanupErr } = makeManualJourneyShell('private_chat')
+  let ctx: SyntheticContext | null = null
+  try {
+    ctx = await setupSyntheticContext(env, SYNTHETIC_APP_DISPLAY_NAME_PRIVATE_CHAT, 2, suffix, details, step)
+    const u0 = ctx.users[0]
+    const u1 = ctx.users[1]
+
+    step('create_private_chat')
+    const createResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v1/chats/private`,
+      { Authorization: `Bearer ${u0.token}` },
+      { title: `dm-${suffix}`, members: [u1.xmppUsername], uuid: `dm-${suffix}` }
+    )
+    if (!createResp.resp.ok) throw new Error(`create private chat failed: ${createResp.resp.status} ${createResp.text}`)
+    const chatName = String(createResp.json?.result?.name || '').trim()
+    if (!chatName) throw new Error('create private chat: missing name')
+    ctx.chatNames.push(chatName)
+
+    step('list_my_chats')
+    const myResp = await httpJson(
+      'GET',
+      `${env.ethoraApiBase}/v1/chats/my`,
+      { Authorization: `Bearer ${u0.token}` }
+    )
+    if (!myResp.resp.ok) throw new Error(`list my chats failed: ${myResp.resp.status} ${myResp.text}`)
+
+    step('ok')
+    return { ok: true, details }
+  } catch (e: any) {
+    details.steps.push({ name: 'error', message: e?.message || String(e), ts: new Date().toISOString() })
+    return { ok: false, details: { ...details, error: e?.message || String(e) } }
+  } finally {
+    await teardownSyntheticContext(env, ctx, details, step, cleanupErr)
+  }
+}
+
+// 9) journey_v2_user_chats — public chat + GET /v2/chats/users + PATCH /v2/chats/users.
+async function runJourneyV2UserChats(env: JourneyEnv): Promise<JourneyResult> {
+  const { suffix, details, step, cleanupErr } = makeManualJourneyShell('v2_user_chats')
+  let ctx: SyntheticContext | null = null
+  try {
+    ctx = await setupSyntheticContext(env, SYNTHETIC_APP_DISPLAY_NAME_V2_USER_CHATS, 2, suffix, details, step)
+    const u0 = ctx.users[0]
+    const u1 = ctx.users[1]
+
+    step('create_chat')
+    const createResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v2/chats`,
+      { Authorization: `Bearer ${u0.token}` },
+      { title: `v2uc-${suffix}`, description: 'uptime v2 user chats', type: 'group', uuid: `v2uc-${suffix}`, members: [u1.xmppUsername] }
+    )
+    if (!createResp.resp.ok) throw new Error(`create chat failed: ${createResp.resp.status} ${createResp.text}`)
+    const chatName = String(createResp.json?.result?.name || '').trim()
+    if (!chatName) throw new Error('create chat: missing name')
+    ctx.chatNames.push(chatName)
+
+    step('get_v2_chats_users')
+    const getResp = await httpJson(
+      'GET',
+      `${env.ethoraApiBase}/v2/chats/users`,
+      { Authorization: `Bearer ${u0.token}` }
+    )
+    if (!getResp.resp.ok) throw new Error(`get /v2/chats/users failed: ${getResp.resp.status} ${getResp.text}`)
+    details.usersInChats = Array.isArray(getResp.json?.users) ? getResp.json.users.length : null
+
+    // PATCH /v2/chats/users is a multipart endpoint expecting profile-image
+    // updates etc.; many installs require a file part. We send a minimal text
+    // body and accept 4xx (validation error) without failing — what we want
+    // to verify is that the route is mounted and responding.
+    step('patch_v2_chats_users')
+    const fForm = new FormData()
+    fForm.append('firstName', `Updated-${suffix}`)
+    const patchResp = await fetch(`${env.ethoraApiBase}/v2/chats/users`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${u0.token}` },
+      body: fForm,
+    })
+    if (patchResp.status >= 500) {
+      const txt = await patchResp.text().catch(() => '')
+      throw new Error(`patch /v2/chats/users 5xx: ${patchResp.status} ${txt.slice(0, 200)}`)
+    }
+    details.patchStatus = patchResp.status
+
+    step('ok')
+    return { ok: true, details }
+  } catch (e: any) {
+    details.steps.push({ name: 'error', message: e?.message || String(e), ts: new Date().toISOString() })
+    return { ok: false, details: { ...details, error: e?.message || String(e) } }
+  } finally {
+    await teardownSyntheticContext(env, ctx, details, step, cleanupErr)
+  }
+}
+
 export async function runJourney(env: JourneyEnv, opts?: JourneyOptions): Promise<JourneyResult> {
   const mode = resolveMode(env, opts)
   if (mode === 'b2b') return await runJourneyB2B(env)
   if (mode === 'advanced') return await runJourneyAdvanced(env, opts)
+  // Optional manual journeys
+  if (mode === 'token_refresh') return await runJourneyTokenRefresh(env)
+  if (mode === 'signup_validation') return await runJourneySignupValidation(env)
+  if (mode === 'password_reset') return await runJourneyPasswordReset(env)
+  if (mode === 'app_stats') return await runJourneyAppStats(env)
+  if (mode === 'user_tags') return await runJourneyUserTags(env)
+  if (mode === 'chat_reports') return await runJourneyChatReports(env)
+  if (mode === 'v1_files') return await runJourneyV1Files(env)
+  if (mode === 'private_chat') return await runJourneyPrivateChat(env)
+  if (mode === 'v2_user_chats') return await runJourneyV2UserChats(env)
 
   // Per-run user/chat uniqueness via suffix; the synthetic app uses a STABLE
   // displayName per mode so the backend's `__uptime__` analytics bypass fires.

@@ -164,16 +164,28 @@ tenant-actor API surface:
 - `POST /v2/apps/{appId}/chats/broadcast` + `GET /v2/apps/{appId}/chats/broadcast/{jobId}` — async broadcast (skipped gracefully if 5xx)
 - `DELETE /v2/apps/{appId}` — delete the child app (cleanup)
 
-### Roadmap (not yet implemented)
+### Optional manual journeys (run on demand from the wallboard)
 
-If you want even more coverage, candidate journeys to add:
+These are configured with `enabled: false` and `intervalSeconds: 0` in
+`uptime.yml`, so they never run on a schedule. They show up in the wallboard's
+"Optional & manual checks" section with a `▶` button. Use them after install /
+update for QA, or ad-hoc to confirm a specific area still works.
 
-- `journey_password_reset` — `POST /v1/users/forgot` + `POST /v1/users/reset` (without email roundtrip; just confirms endpoints respond)
-- `journey_token_refresh` — `POST /v1/users/login/refresh`
-- `journey_signup_validation` — `POST /v1/apps/check-domain-name` + `GET /v1/users/checkEmail/{email}`
-- `journey_user_tags` — `POST /v1/users/tags-add/{appId}` + `tags-set` + `tags-delete`
-- `journey_chat_reports` — `POST /v1/chats/reports/{chatName}` (moderation flow)
-- `journey_app_stats` — `GET /v1/apps/graph-statistic/{appId}`
+| `checks[].id` | What it covers |
+|---|---|
+| `journey_token_refresh` | `POST /v1/users/login` → `POST /v1/users/login/refresh` → `GET /v1/users/me` with the refreshed token |
+| `journey_signup_validation` | `POST /v1/apps/check-domain-name` + `GET /v1/users/checkEmail/{email}` |
+| `journey_password_reset` | `POST /v1/users/forgot` for an existing user, then `POST /v1/users/reset` with a deliberately invalid token (expect 4xx). Does NOT roundtrip the email. |
+| `journey_app_stats` | `GET /v1/apps/graph-statistic/{appId}` + `GET /v1/apps/{id}` |
+| `journey_user_tags` | `POST /v1/users/tags-add/{appId}` + `tags-set` + `tags-delete` |
+| `journey_chat_reports` | Public chat + `POST /v1/chats/reports/{chatName}` (moderation flow) |
+| `journey_v1_files` | `POST /v1/files/` + `GET /v1/files/` + `GET /v1/files/{id}` + `DELETE /v1/files/{id}` |
+| `journey_private_chat` | `POST /v1/chats/private` + `GET /v1/chats/my` |
+| `journey_v2_user_chats` | `POST /v2/chats` + `GET /v2/chats/users` + `PATCH /v2/chats/users` |
+
+All manual journeys (except `token_refresh` and `signup_validation`) create + delete
+their own dedicated synthetic app per run, with the same `__uptime__journey_<mode>`
+display-name contract for analytics suppression and orphan recovery.
 
 ### Required env for **basic** journey
 
