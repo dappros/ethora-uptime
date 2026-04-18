@@ -5,55 +5,205 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Ethora Uptime</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%232ecc71'/%3E%3C/svg%3E" />
     <style>
-      :root { color-scheme: light dark; }
-      body { font-family: ui-sans-serif, system-ui, Arial; margin: 0; padding: 16px; }
-      header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 16px; }
-      .card { border: 1px solid rgba(127,127,127,0.35); border-radius: 10px; padding: 12px; }
-      .status { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; }
-      .dot { width: 10px; height: 10px; border-radius: 999px; background: gray; display: inline-block; }
-      .green { background: #2ecc71; }
-      .amber { background: #f1c40f; }
-      .red { background: #e74c3c; }
-      table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-      th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid rgba(127,127,127,0.2); font-size: 13px; }
-      .muted { opacity: 0.7; font-size: 12px; }
-      a { color: inherit; }
-      button { padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(127,127,127,0.35); background: transparent; cursor: pointer; }
+      :root {
+        --bg: #0f1115;
+        --card: #161a21;
+        --card-border: #262b35;
+        --text: #e6edf3;
+        --muted: #8b95a6;
+        --link: #79c0ff;
+        --green: #2ea043;
+        --amber: #d29922;
+        --red: #f85149;
+        --gray: #6e7681;
+        --accent: #58a6ff;
+        --accent-bg: rgba(88,166,255,0.1);
+        --shadow: 0 4px 14px rgba(0,0,0,0.35);
+        color-scheme: dark;
+      }
+      [data-theme="light"] {
+        --bg: #f6f8fa;
+        --card: #ffffff;
+        --card-border: #d0d7de;
+        --text: #1f2328;
+        --muted: #59636e;
+        --link: #0969da;
+        --green: #1a7f37;
+        --amber: #9a6700;
+        --red: #cf222e;
+        --gray: #57606a;
+        --accent: #0969da;
+        --accent-bg: rgba(9,105,218,0.08);
+        --shadow: 0 1px 4px rgba(0,0,0,0.08);
+        color-scheme: light;
+      }
+      [data-theme="wallboard"] {
+        --bg: #000000;
+        --card: #0a0d12;
+        --card-border: #1a1f29;
+        --text: #ffffff;
+        --muted: #9aa6ba;
+        --green: #2ea043;
+        --amber: #f0b429;
+        --red: #ff4d4f;
+        color-scheme: dark;
+      }
+      [data-theme="wallboard"] body { font-size: 18px; }
+      [data-theme="wallboard"] .name { font-size: 22px; }
 
-      /* Modal (details) */
-      .modalBackdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: none; align-items: center; justify-content: center; padding: 16px; z-index: 1000; }
-      .modal { width: min(900px, 100%); max-height: min(78vh, 720px); overflow: auto; background: Canvas; border: 1px solid rgba(127,127,127,0.35); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.3); }
-      .modalHeader { display:flex; justify-content: space-between; gap: 12px; align-items: center; padding: 12px 12px 8px; border-bottom: 1px solid rgba(127,127,127,0.2); }
-      .modalTitle { font-weight: 800; }
-      .modalBody { padding: 12px; }
-      .pill { display:inline-flex; align-items:center; gap: 6px; border: 1px solid rgba(127,127,127,0.35); border-radius: 999px; padding: 4px 8px; font-size: 12px; }
-      .stepRow { display:flex; gap:10px; align-items: center; padding: 6px 0; border-bottom: 1px dashed rgba(127,127,127,0.2); }
-      .stepName { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 12px; }
-      .stepTs { margin-left:auto; opacity: 0.7; font-size: 12px; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; background: var(--bg); color: var(--text); font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial; }
+      body { padding: 16px; }
+      a { color: var(--link); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+      button { font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--card-border); border-radius: 8px; padding: 7px 12px; cursor: pointer; transition: background 0.15s; }
+      button:hover:not(:disabled) { background: var(--accent-bg); border-color: var(--accent); }
+      button:disabled { opacity: 0.6; cursor: not-allowed; }
+      button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+      button.primary:hover:not(:disabled) { filter: brightness(1.1); background: var(--accent); }
+      button.ghost { background: transparent; border-color: transparent; padding: 4px 8px; color: var(--muted); }
+      button.ghost:hover:not(:disabled) { color: var(--text); background: var(--accent-bg); border-color: transparent; }
+
+      header.app { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 14px; }
+      .brand { display: flex; align-items: center; gap: 12px; }
+      .brand-mark { width: 28px; height: 28px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px var(--accent-bg); }
+      .brand-name { font-size: 18px; font-weight: 700; letter-spacing: 0.2px; }
+      .brand-sub { font-size: 12px; color: var(--muted); }
+
+      .header-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+      .header-actions .sep { width: 1px; align-self: stretch; background: var(--card-border); }
+
+      .rollup { background: var(--card); border: 1px solid var(--card-border); border-radius: 12px; padding: 14px 16px; display: flex; gap: 22px; align-items: center; flex-wrap: wrap; box-shadow: var(--shadow); margin-bottom: 14px; }
+      .rollup .pill { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; }
+      .rollup .pill .num { font-size: 22px; font-variant-numeric: tabular-nums; }
+      .rollup .pill .label { color: var(--muted); font-size: 13px; }
+      .rollup .pill.green .num { color: var(--green); }
+      .rollup .pill.amber .num { color: var(--amber); }
+      .rollup .pill.red .num { color: var(--red); }
+      .rollup .pill.gray .num { color: var(--muted); }
+      .rollup .spacer { flex: 1; }
+      .rollup .updated { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 8px; }
+      .countdown { display: inline-flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+
+      .filter-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+      .chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--card-border); font-size: 12px; cursor: pointer; user-select: none; background: var(--card); }
+      .chip.active { background: var(--accent-bg); border-color: var(--accent); color: var(--text); }
+      .chip .num { color: var(--muted); }
+
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 14px; }
+      [data-theme="wallboard"] .grid { grid-template-columns: repeat(auto-fit, minmax(440px, 1fr)); gap: 18px; }
+
+      .card { background: var(--card); border: 1px solid var(--card-border); border-radius: 12px; padding: 14px 14px 10px; box-shadow: var(--shadow); display: flex; flex-direction: column; }
+      .card.disabled { opacity: 0.55; }
+      .card.status-red { border-left: 4px solid var(--red); }
+      .card.status-amber { border-left: 4px solid var(--amber); }
+      .card.status-green { border-left: 4px solid var(--green); }
+      .card.status-gray { border-left: 4px solid var(--gray); }
+
+      .card-head { display: flex; gap: 10px; justify-content: space-between; align-items: flex-start; }
+      .name { font-weight: 700; font-size: 15px; }
+      .meta-line { color: var(--muted); font-size: 12px; margin-top: 2px; word-break: break-all; }
+      .badges { display: inline-flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+      .badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--card-border); font-size: 11px; color: var(--muted); }
+      .status-tag { display: inline-flex; align-items: center; gap: 8px; font-weight: 700; font-size: 13px; letter-spacing: 0.4px; padding: 5px 10px; border-radius: 999px; }
+      .status-tag.green { color: var(--green); background: rgba(46,160,67,0.12); }
+      .status-tag.amber { color: var(--amber); background: rgba(210,153,34,0.15); }
+      .status-tag.red { color: var(--red); background: rgba(248,81,73,0.15); }
+      .status-tag.gray { color: var(--muted); background: rgba(110,118,129,0.15); }
+
+      .card-actions { display: flex; gap: 6px; margin: 10px 0 4px; flex-wrap: wrap; }
+      .card-actions .spacer { flex: 1; }
+
+      table.checks { width: 100%; border-collapse: collapse; margin-top: 6px; }
+      table.checks th, table.checks td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--card-border); font-size: 13px; vertical-align: middle; }
+      table.checks th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+      table.checks tr:last-child td { border-bottom: none; }
+      table.checks .check-name { font-weight: 500; }
+      table.checks .check-name a { color: var(--text); }
+      table.checks .check-name a:hover { color: var(--link); }
+      .dot { width: 9px; height: 9px; border-radius: 999px; display: inline-block; flex-shrink: 0; }
+      .dot.green { background: var(--green); }
+      .dot.amber { background: var(--amber); }
+      .dot.red { background: var(--red); }
+      .dot.gray { background: var(--gray); }
+      .dot.outline-amber { background: transparent; border: 2px solid var(--amber); }
+      .status-cell { display: inline-flex; align-items: center; gap: 6px; }
+      .err-text { color: var(--muted); font-size: 11px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: middle; }
+      .err-text.checker_error { color: var(--amber); }
+      .when { color: var(--muted); font-size: 11px; white-space: nowrap; }
+      .ms { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; white-space: nowrap; }
+      .row-actions { display: inline-flex; gap: 4px; }
+
+      .sparkline { display: inline-block; vertical-align: middle; }
+      .sparkline rect.bg { fill: var(--card-border); opacity: 0.4; }
+      .sparkline rect.ok { fill: var(--green); }
+      .sparkline rect.fail { fill: var(--red); }
+      .sparkline rect.empty { fill: transparent; stroke: var(--card-border); stroke-width: 0.5; }
+
+      details.optional-section { margin-top: 8px; }
+      details.optional-section > summary { list-style: none; cursor: pointer; padding: 6px 4px; color: var(--muted); font-size: 12px; user-select: none; display: flex; gap: 8px; align-items: center; }
+      details.optional-section > summary::-webkit-details-marker { display: none; }
+      details.optional-section > summary::before { content: '▸'; transition: transform 0.15s; display: inline-block; }
+      details.optional-section[open] > summary::before { transform: rotate(90deg); }
+
+      /* Modal */
+      .modalBackdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: none; align-items: center; justify-content: center; padding: 16px; z-index: 1000; }
+      .modal { width: min(900px, 100%); max-height: min(82vh, 760px); overflow: auto; background: var(--card); border: 1px solid var(--card-border); border-radius: 12px; box-shadow: 0 18px 50px rgba(0,0,0,0.55); }
+      .modalHeader { display:flex; justify-content: space-between; gap: 12px; align-items: center; padding: 14px 16px 10px; border-bottom: 1px solid var(--card-border); position: sticky; top: 0; background: var(--card); }
+      .modalTitle { font-weight: 700; font-size: 16px; }
+      .modalSub { color: var(--muted); font-size: 12px; }
+      .modalBody { padding: 14px 16px; }
+      .pill { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--card-border); border-radius: 999px; padding: 4px 10px; font-size: 12px; }
+      .stepRow { display: grid; grid-template-columns: 16px 1fr auto auto; gap: 10px; align-items: center; padding: 6px 0; border-bottom: 1px dashed var(--card-border); }
+      .stepRow:last-child { border-bottom: none; }
+      .stepName { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
+      .stepDelta { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+      .stepTs { color: var(--muted); font-size: 11px; }
+      .toolbar-spacer { flex: 1; }
+
+      .empty { padding: 40px 20px; text-align: center; color: var(--muted); border: 1px dashed var(--card-border); border-radius: 12px; }
+
+      /* Inline popover for run options */
+      .popover { position: absolute; background: var(--card); border: 1px solid var(--accent); border-radius: 10px; padding: 12px; box-shadow: var(--shadow); z-index: 50; min-width: 280px; }
+      .popover label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+      .popover input { width: 100%; padding: 8px; border-radius: 8px; border: 1px solid var(--card-border); background: var(--bg); color: var(--text); font: inherit; }
+      .popover .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
     </style>
   </head>
-  <body>
-    <header>
-      <div>
-        <div style="font-size:18px;font-weight:700;">Ethora Uptime</div>
-        <div class="muted">Wallboard overview (green/amber/red)</div>
+  <body data-theme="dark">
+    <header class="app">
+      <div class="brand">
+        <span class="brand-mark" id="brandMark"></span>
+        <div>
+          <div class="brand-name">Ethora Uptime</div>
+          <div class="brand-sub">Synthetic monitoring &amp; QA wallboard</div>
+        </div>
       </div>
-      <div>
-        <button id="refreshBtn">Refresh</button>
-        <span class="muted" id="updatedAt"></span>
+      <div class="header-actions">
+        <button class="ghost" id="themeBtn" title="Toggle theme">Theme</button>
+        <button class="ghost" id="disabledToggleBtn" title="Show disabled instances">Show disabled</button>
+        <span class="sep"></span>
+        <button class="ghost" id="pauseBtn" title="Pause auto-refresh">Pause</button>
+        <button id="refreshBtn">Refresh now</button>
       </div>
     </header>
 
-    <div class="grid" id="grid"></div>
+    <section class="rollup" id="rollup" aria-live="polite"></section>
+
+    <div class="filter-bar" id="filterBar"></div>
+
+    <main class="grid" id="grid"></main>
+
+    <div class="empty" id="emptyState" style="display:none;">No instances match the current filters.</div>
 
     <div class="modalBackdrop" id="modalBackdrop" role="dialog" aria-modal="true" aria-hidden="true">
       <div class="modal">
         <div class="modalHeader">
           <div>
             <div class="modalTitle" id="modalTitle">Details</div>
-            <div class="muted" id="modalSubtitle"></div>
+            <div class="modalSub" id="modalSubtitle"></div>
           </div>
           <button id="modalCloseBtn">Close</button>
         </div>
@@ -62,9 +212,31 @@
     </div>
 
     <script>
+      // ---------- State ----------
+      const REFRESH_MS = 15000;
+      const state = {
+        autoRefresh: true,
+        countdown: REFRESH_MS / 1000,
+        countdownTimer: null,
+        showDisabled: false,
+        activeTags: new Set(),
+        knownTags: new Set(),
+        lastSummary: null,
+        sparklineCache: new Map(),
+        sparklineInflight: new Map(),
+        theme: localStorage.getItem('ethoraUptime.theme') || 'dark',
+      };
+
+      // ---------- DOM refs ----------
       const grid = document.getElementById('grid');
-      const updatedAt = document.getElementById('updatedAt');
+      const rollup = document.getElementById('rollup');
+      const emptyState = document.getElementById('emptyState');
+      const filterBar = document.getElementById('filterBar');
       const refreshBtn = document.getElementById('refreshBtn');
+      const pauseBtn = document.getElementById('pauseBtn');
+      const themeBtn = document.getElementById('themeBtn');
+      const disabledToggleBtn = document.getElementById('disabledToggleBtn');
+      const brandMark = document.getElementById('brandMark');
 
       const modalBackdrop = document.getElementById('modalBackdrop');
       const modalTitle = document.getElementById('modalTitle');
@@ -72,12 +244,12 @@
       const modalBody = document.getElementById('modalBody');
       const modalCloseBtn = document.getElementById('modalCloseBtn');
 
-      function statusToClass(st) {
-        if (st === 'green') return 'green';
-        if (st === 'amber') return 'amber';
-        if (st === 'red') return 'red';
-        return '';
+      // ---------- Helpers ----------
+      function applyTheme() {
+        document.body.setAttribute('data-theme', state.theme);
+        themeBtn.textContent = state.theme === 'wallboard' ? 'Wallboard' : (state.theme === 'light' ? 'Light' : 'Dark');
       }
+      applyTheme();
 
       function escapeHtml(s) {
         return String(s ?? '')
@@ -87,11 +259,30 @@
           .replaceAll('"', '&quot;')
           .replaceAll("'", '&#39;');
       }
-
-      function fmtTs(ts) {
+      function fmtAbsoluteTs(ts) {
         try { return new Date(ts).toLocaleString(); } catch { return String(ts || ''); }
       }
+      function fmtRelative(seconds) {
+        if (seconds == null || seconds < 0) return '';
+        if (seconds < 5) return 'just now';
+        if (seconds < 60) return `${Math.floor(seconds)}s ago`;
+        if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+        if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+        return `${Math.floor(seconds / 86400)}d ago`;
+      }
+      function statusToClass(st) { return ['green', 'amber', 'red', 'gray'].includes(st) ? st : 'gray'; }
 
+      function classifyCheckRow(c) {
+        // 'green' = ok; 'red' = real failure; 'amber' = checker error / skipped / no-data;
+        // 'gray' = manual/disabled (never scheduled)
+        if (c.noRunReason === 'manual_or_disabled') return 'gray';
+        if (c.noRunReason === 'no_data_yet') return 'amber';
+        if (c.ok) return 'green';
+        if (c.errorClass === 'checker_error' || c.errorClass === 'skipped') return 'amber';
+        return 'red';
+      }
+
+      // ---------- Modal ----------
       function openModal({ title, subtitle, html }) {
         modalTitle.textContent = title || 'Details';
         modalSubtitle.textContent = subtitle || '';
@@ -99,49 +290,325 @@
         modalBackdrop.style.display = 'flex';
         modalBackdrop.setAttribute('aria-hidden', 'false');
       }
-
       function closeModal() {
         modalBackdrop.style.display = 'none';
         modalBackdrop.setAttribute('aria-hidden', 'true');
         modalBody.innerHTML = '';
       }
-
       modalCloseBtn.addEventListener('click', () => closeModal());
-      modalBackdrop.addEventListener('click', (e) => {
-        if (e.target === modalBackdrop) closeModal();
-      });
-      document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') closeModal();
+      modalBackdrop.addEventListener('click', (e) => { if (e.target === modalBackdrop) closeModal(); });
+      document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+
+      // ---------- Render: rollup ----------
+      function renderRollup(data) {
+        if (!data) {
+          rollup.innerHTML = '<span class="updated">Loading...</span>';
+          return;
+        }
+        const t = data.totals || {};
+        const st = t.byStatus || { green: 0, amber: 0, red: 0 };
+        const overall = st.red > 0 ? 'red' : st.amber > 0 ? 'amber' : (t.enabledInstances > 0 ? 'green' : 'gray');
+        brandMark.style.background = `var(--${overall})`;
+        rollup.innerHTML = `
+          <span class="pill ${overall}"><span class="num">${st.green || 0}</span><span class="label">green</span></span>
+          <span class="pill amber"><span class="num">${st.amber || 0}</span><span class="label">amber</span></span>
+          <span class="pill red"><span class="num">${st.red || 0}</span><span class="label">red</span></span>
+          <span class="pill gray"><span class="num">${t.enabledInstances || 0}/${t.instances || 0}</span><span class="label">instances enabled</span></span>
+          <span class="pill gray"><span class="num">${(t.criticalChecks || 0) - (t.criticalFailing || 0)}/${t.criticalChecks || 0}</span><span class="label">critical OK</span></span>
+          ${t.optionalChecks ? `<span class="pill gray"><span class="num">${(t.optionalChecks || 0) - (t.optionalFailing || 0)}/${t.optionalChecks || 0}</span><span class="label">optional OK</span></span>` : ''}
+          <span class="spacer"></span>
+          <span class="updated">
+            <span id="updatedAt">Updated: ${new Date(data.generatedAt || Date.now()).toLocaleTimeString()}</span>
+            <span class="countdown" id="countdown">${state.autoRefresh ? `↻ ${state.countdown}s` : '⏸ paused'}</span>
+          </span>
+        `;
+      }
+
+      // ---------- Render: filter chips ----------
+      function renderFilterChips(data) {
+        const tags = new Set();
+        for (const inst of data.instances || []) {
+          for (const t of (inst.tags || [])) tags.add(String(t));
+        }
+        state.knownTags = tags;
+        if (tags.size === 0) { filterBar.innerHTML = ''; return; }
+        const chips = ['<span class="chip" data-tag="__all__">All <span class="num">' + (data.instances || []).length + '</span></span>'];
+        for (const tag of [...tags].sort()) {
+          const count = (data.instances || []).filter(i => (i.tags || []).includes(tag)).length;
+          chips.push(`<span class="chip" data-tag="${escapeHtml(tag)}">${escapeHtml(tag)} <span class="num">${count}</span></span>`);
+        }
+        filterBar.innerHTML = chips.join('');
+        for (const chip of filterBar.querySelectorAll('.chip')) {
+          const tag = chip.getAttribute('data-tag');
+          const isAll = tag === '__all__';
+          if (isAll && state.activeTags.size === 0) chip.classList.add('active');
+          else if (!isAll && state.activeTags.has(tag)) chip.classList.add('active');
+          chip.addEventListener('click', () => {
+            if (isAll) state.activeTags.clear();
+            else if (state.activeTags.has(tag)) state.activeTags.delete(tag);
+            else state.activeTags.add(tag);
+            render(state.lastSummary);
+          });
+        }
+      }
+
+      function passesFilters(inst) {
+        if (!state.showDisabled && !inst.enabled) return false;
+        if (state.activeTags.size === 0) return true;
+        const tags = new Set(inst.tags || []);
+        for (const t of state.activeTags) if (tags.has(t)) return true;
+        return false;
+      }
+
+      // ---------- Render: sparkline ----------
+      function renderSparklineSvg(buckets) {
+        const w = 90, h = 18, gap = 1;
+        const n = buckets.length;
+        if (!n) return '';
+        const bw = (w - gap * (n - 1)) / n;
+        const parts = [`<svg class="sparkline" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-label="24h sparkline">`];
+        for (let i = 0; i < n; i++) {
+          const b = buckets[i];
+          const x = i * (bw + gap);
+          if (b.total === 0) {
+            parts.push(`<rect class="empty" x="${x}" y="${h-3}" width="${bw}" height="3" rx="1"/>`);
+          } else {
+            const okPct = b.okCount / b.total;
+            const okH = Math.max(2, Math.round(h * okPct));
+            const failH = h - okH;
+            if (failH > 0) parts.push(`<rect class="fail" x="${x}" y="0" width="${bw}" height="${failH}" rx="1"/>`);
+            parts.push(`<rect class="ok" x="${x}" y="${failH}" width="${bw}" height="${okH}" rx="1"/>`);
+          }
+        }
+        parts.push('</svg>');
+        return parts.join('');
+      }
+
+      async function loadSparkline(checkId, container) {
+        const cached = state.sparklineCache.get(checkId);
+        if (cached && (Date.now() - cached.t) < 60000) {
+          container.innerHTML = renderSparklineSvg(cached.buckets);
+          return;
+        }
+        if (state.sparklineInflight.has(checkId)) return;
+        state.sparklineInflight.set(checkId, true);
+        try {
+          const r = await fetch(`/api/sparkline?checkId=${encodeURIComponent(checkId)}&sinceMinutes=1440&buckets=24`);
+          if (!r.ok) return;
+          const j = await r.json();
+          const buckets = Array.isArray(j?.buckets) ? j.buckets : [];
+          state.sparklineCache.set(checkId, { t: Date.now(), buckets });
+          container.innerHTML = renderSparklineSvg(buckets);
+        } catch {}
+        finally { state.sparklineInflight.delete(checkId); }
+      }
+
+      // ---------- Render: card ----------
+      function renderRowsTable(rows, opts = {}) {
+        if (!rows.length) return '';
+        const headerExtra = opts.actions ? '<th></th>' : '';
+        return `
+          <table class="checks">
+            <thead><tr><th></th><th>Check</th><th>Status</th><th>Latency</th><th>When</th><th>24h</th>${headerExtra}</tr></thead>
+            <tbody>
+              ${rows.map(c => {
+                const klass = classifyCheckRow(c);
+                let statusText = '';
+                if (klass === 'green') statusText = 'OK' + (c.statusCode ? ` <span class="err-text">${c.statusCode}</span>` : '');
+                else if (klass === 'gray') statusText = '<span class="err-text">manual</span>';
+                else if (klass === 'amber') {
+                  const reason = c.noRunReason === 'no_data_yet' ? 'warming up'
+                    : c.errorClass === 'skipped' ? (c.errorText || 'skipped').replace(/^skipped:\s*/,'')
+                    : (c.errorText || 'checker error');
+                  statusText = `<span class="err-text checker_error" title="${escapeHtml(c.errorText || reason)}">${escapeHtml(reason)}</span>`;
+                } else {
+                  const txt = c.errorText || `FAIL${c.statusCode ? ` (${c.statusCode})` : ''}`;
+                  statusText = `<span class="err-text" title="${escapeHtml(c.errorText || '')}">${escapeHtml(txt)}</span>`;
+                }
+                const dotClass = klass === 'amber' ? 'amber' : klass === 'red' ? 'red' : klass === 'green' ? 'green' : 'gray';
+                const sparkId = `spark_${c.id.replace(/[^a-zA-Z0-9_]/g,'_')}`;
+                const actionsHtml = opts.actions ? `<td style="text-align:right; white-space:nowrap;">${opts.actions(c)}</td>` : '';
+                return `
+                  <tr data-check-id="${escapeHtml(c.id)}">
+                    <td><span class="dot ${dotClass}"></span></td>
+                    <td class="check-name"><a href="/history.html#${encodeURIComponent(c.id)}">${escapeHtml(c.name)}</a></td>
+                    <td>${statusText}</td>
+                    <td class="ms">${c.durationMs != null ? c.durationMs + ' ms' : ''}</td>
+                    <td class="when" title="${escapeHtml(c.lastRunIso ? fmtAbsoluteTs(c.lastRunIso) : '')}">${escapeHtml(fmtRelative(c.lastRunAgoSeconds))}</td>
+                    <td><span id="${sparkId}" class="spark-host"></span></td>
+                    ${actionsHtml}
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        `;
+      }
+
+      function buildCard(inst) {
+        const critical = inst.checks.filter(c => (c.severity || 'critical') === 'critical');
+        const optional = inst.checks.filter(c => (c.severity || 'critical') !== 'critical');
+
+        const buildLine = inst.build
+          ? [
+              inst.build.buildVersion ? `v${inst.build.buildVersion}` : (inst.build.version ? `v${inst.build.version}` : null),
+              inst.build.commit ? `commit ${String(inst.build.commit).slice(0, 12)}` : null,
+              inst.build.time ? `${inst.build.time}` : null,
+            ].filter(Boolean).join(' · ')
+          : '';
+
+        const tagBadges = (inst.tags || []).map(t => `<span class="badge">${escapeHtml(t)}</span>`).join('');
+        const disabledBadge = !inst.enabled ? '<span class="badge" style="border-color: var(--amber); color: var(--amber);">disabled</span>' : '';
+
+        const instStatus = inst.enabled ? statusToClass(inst.status) : 'gray';
+
+        // Find the journey check (if any) for the promoted Run action.
+        const journeyChecks = inst.checks.filter(c => c.type === 'journey');
+        const pushValidate = inst.checks.find(c => c.type === 'push_validate');
+
+        const journeyButtons = journeyChecks.map(c => {
+          const label = c.name.replace(/^Synthetic_journey_?/, '').replace(/_/g, ' ').trim() || 'basic';
+          return `<button class="primary" data-run="${escapeHtml(c.id)}" data-run-kind="journey" data-instance="${escapeHtml(inst.id)}" data-name="${escapeHtml(c.name)}" title="Run synthetic journey: ${escapeHtml(c.name)}">▶ Journey: ${escapeHtml(label)}</button>`;
+        }).join('');
+        const pushButton = pushValidate
+          ? `<button data-run="${escapeHtml(pushValidate.id)}" data-run-kind="push_validate" data-instance="${escapeHtml(inst.id)}" data-name="${escapeHtml(pushValidate.name)}">▶ Push validate</button>`
+          : '';
+
+        const rowActions = (c) => {
+          const parts = [];
+          if (c.type === 'journey') parts.push(`<button class="ghost" data-run="${escapeHtml(c.id)}" data-run-kind="journey" data-instance="${escapeHtml(inst.id)}" data-name="${escapeHtml(c.name)}" title="Run now">▶</button>`);
+          if (c.type === 'push_validate') parts.push(`<button class="ghost" data-run="${escapeHtml(c.id)}" data-run-kind="push_validate" data-instance="${escapeHtml(inst.id)}" data-name="${escapeHtml(c.name)}" title="Run now">▶</button>`);
+          parts.push(`<button class="ghost" data-details="${escapeHtml(c.id)}" data-name="${escapeHtml(c.name)}" title="Last-run details">⋯</button>`);
+          return `<span class="row-actions">${parts.join('')}</span>`;
+        };
+
+        const card = document.createElement('div');
+        card.className = `card status-${instStatus}` + (inst.enabled ? '' : ' disabled');
+        card.innerHTML = `
+          <div class="card-head">
+            <div>
+              <div class="name">${escapeHtml(inst.name)}</div>
+              <div class="meta-line">${escapeHtml(inst.id)}${buildLine ? ` &middot; ${escapeHtml(buildLine)}` : ''}</div>
+              <div class="badges">${tagBadges}${disabledBadge}</div>
+            </div>
+            <div class="status-tag ${instStatus}"><span class="dot ${instStatus}"></span>${instStatus.toUpperCase()}</div>
+          </div>
+          ${(journeyButtons || pushButton) ? `<div class="card-actions">${journeyButtons}${pushButton}<span class="spacer"></span></div>` : ''}
+          ${renderRowsTable(critical, { actions: rowActions })}
+          ${optional.length ? `
+            <details class="optional-section">
+              <summary>Optional &amp; manual checks (${optional.length})</summary>
+              ${renderRowsTable(optional, { actions: rowActions })}
+            </details>
+          ` : ''}
+        `;
+        return card;
+      }
+
+      // ---------- Run popover ----------
+      let activePopover = null;
+      function closePopover() {
+        if (activePopover) { activePopover.remove(); activePopover = null; }
+      }
+      document.addEventListener('click', (e) => {
+        if (activePopover && !activePopover.contains(e.target) && !e.target.matches('button[data-run]')) {
+          closePopover();
+        }
       });
 
-      function renderJourneySteps(details) {
-        const steps = Array.isArray(details?.steps) ? details.steps : [];
-        const errorMsg = details?.error || '';
-        const items = steps.map((s) => {
-          const name = s?.name || '';
-          const isError = name === 'error';
-          const dot = `<span class="dot ${isError ? 'red' : 'green'}"></span>`;
-          const msg = isError && s?.message ? `<div class="muted">${escapeHtml(s.message)}</div>` : '';
-          return `
-            <div class="stepRow">
-              ${dot}
-              <div>
-                <div class="stepName">${escapeHtml(name)}</div>
-                ${msg}
-              </div>
-              <div class="stepTs">${escapeHtml(s?.ts || '')}</div>
+      async function askJourneyObserverRoom(anchorBtn, checkName) {
+        return new Promise((resolve) => {
+          closePopover();
+          const key = 'ethoraUptime.journeyObserverRoom';
+          const existing = (localStorage.getItem(key) || '').trim();
+          const pop = document.createElement('div');
+          pop.className = 'popover';
+          pop.innerHTML = `
+            <label>Observer room (optional, JID or short name)</label>
+            <input type="text" value="${escapeHtml(existing)}" placeholder="operator or APPID_operator@conference.xmpp..." />
+            <div class="row">
+              <button class="ghost" data-act="cancel">Skip</button>
+              <button class="primary" data-act="run">Run ${escapeHtml(checkName)}</button>
             </div>
           `;
-        }).join('');
-        const header = `
-          <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:10px;">
-            <span class="pill"><span class="dot ${details?.ok ? 'green' : 'red'}"></span>${details?.ok ? 'OK' : 'FAIL'}</span>
-            ${details?.durationMs != null ? `<span class="pill">duration ${escapeHtml(details.durationMs)} ms</span>` : ''}
-            ${errorMsg ? `<span class="pill">error: ${escapeHtml(errorMsg)}</span>` : ''}
-          </div>
-        `;
-        const raw = `<details style="margin-top:10px;"><summary class="muted">Raw details</summary><pre style="white-space:pre-wrap; font-size:12px; opacity:0.9;">${escapeHtml(JSON.stringify(details, null, 2))}</pre></details>`;
-        return header + (items || `<div class="muted">No steps captured.</div>`) + raw;
+          document.body.appendChild(pop);
+          activePopover = pop;
+          const r = anchorBtn.getBoundingClientRect();
+          pop.style.top = (window.scrollY + r.bottom + 6) + 'px';
+          pop.style.left = (window.scrollX + Math.min(r.left, document.documentElement.clientWidth - 320)) + 'px';
+          const input = pop.querySelector('input');
+          input.focus();
+          const finish = (val) => { try { closePopover(); } catch {} resolve(val); };
+          pop.querySelector('button[data-act=cancel]').addEventListener('click', () => finish(null));
+          pop.querySelector('button[data-act=run]').addEventListener('click', () => {
+            const v = input.value.trim();
+            try { localStorage.setItem(key, v); } catch {}
+            finish(v);
+          });
+          input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+              const v = input.value.trim();
+              try { localStorage.setItem(key, v); } catch {}
+              finish(v);
+            } else if (e.key === 'Escape') {
+              finish(null);
+            }
+          });
+        });
+      }
+
+      // ---------- Run + Details handlers ----------
+      function attachRowHandlers() {
+        for (const btn of document.querySelectorAll('button[data-run]')) {
+          btn.addEventListener('click', async (ev) => {
+            ev.stopPropagation();
+            const checkId = btn.getAttribute('data-run');
+            if (!checkId) return;
+            const checkName = btn.getAttribute('data-name') || 'Run';
+            const oldText = btn.textContent;
+            const kind = btn.getAttribute('data-run-kind') || '';
+            let journeyObserverRoom = '';
+            if (kind === 'journey') {
+              const v = await askJourneyObserverRoom(btn, checkName);
+              if (v === null) return;
+              journeyObserverRoom = v || '';
+            }
+            btn.disabled = true;
+            try {
+              btn.textContent = 'Running…';
+              const resp = await fetch('/api/run-check', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ checkId, journeyObserverRoom: journeyObserverRoom || undefined }),
+              });
+              const json = await resp.json().catch(() => null);
+              if (json?.run) {
+                renderRunDetails(checkName, checkId, json.run);
+              } else {
+                openModal({ title: checkName, subtitle: checkId, html: `<div class="modalSub">No response body.</div><pre style="white-space:pre-wrap; font-size:12px;">${escapeHtml(JSON.stringify(json, null, 2))}</pre>` });
+              }
+            } finally {
+              btn.disabled = false;
+              btn.textContent = oldText;
+              load().catch(() => {});
+            }
+          });
+        }
+        for (const btn of document.querySelectorAll('button[data-details]')) {
+          btn.addEventListener('click', async (ev) => {
+            ev.stopPropagation();
+            const checkId = btn.getAttribute('data-details');
+            if (!checkId) return;
+            const checkName = btn.getAttribute('data-name') || 'Check';
+            btn.disabled = true;
+            try {
+              const resp = await fetch(`/api/last-run?checkId=${encodeURIComponent(checkId)}`);
+              const json = await resp.json().catch(() => null);
+              if (json?.run) renderRunDetails(checkName, checkId, json.run);
+              else openModal({ title: checkName, subtitle: checkId, html: `<div class="modalSub">No run data yet — click ▶ on this row to run it.</div>` });
+            } finally { btn.disabled = false; }
+          });
+        }
       }
 
       function renderRunDetails(checkName, checkId, run) {
@@ -156,304 +623,139 @@
           `<span class="pill"><span class="dot ${ok ? 'green' : 'red'}"></span>${ok ? 'OK' : 'FAIL'}</span>`,
           statusCode != null ? `<span class="pill">status ${escapeHtml(statusCode)}</span>` : '',
           durationMs != null ? `<span class="pill">${escapeHtml(durationMs)} ms</span>` : '',
-          ts ? `<span class="pill">${escapeHtml(fmtTs(ts))}</span>` : '',
+          ts ? `<span class="pill">${escapeHtml(fmtAbsoluteTs(ts))}</span>` : '',
         ].filter(Boolean).join(' ');
 
-        const err = errorText ? `<div style="margin-top:10px;"><div class="muted">Error</div><div style="font-weight:700;">${escapeHtml(errorText)}</div></div>` : '';
+        const err = errorText ? `<div style="margin-top:10px;"><div class="modalSub">Error</div><div style="font-weight:700; color: var(--red);">${escapeHtml(errorText)}</div></div>` : '';
 
-        const body = (Array.isArray(details?.steps) || typeof details?.error === 'string')
-          ? renderJourneySteps({ ...details, ok, durationMs })
-          : `
-              ${pills}
-              ${err}
-              <details style="margin-top:10px;"><summary class="muted">Raw run</summary><pre style="white-space:pre-wrap; font-size:12px; opacity:0.9;">${escapeHtml(JSON.stringify(run, null, 2))}</pre></details>
-            `;
-
-        openModal({
-          title: checkName || 'Check details',
-          subtitle: checkId || '',
-          html: body,
-        });
-      }
-
-      async function askJourneyObserverRoom(checkName) {
-        const key = 'ethoraUptime.journeyObserverRoom';
-        const existing = (localStorage.getItem(key) || '').trim();
-
-        return await new Promise((resolve) => {
-          const inputId = 'journeyObserverRoomInput';
-          const runBtnId = 'journeyObserverRunBtn';
-          const cancelBtnId = 'journeyObserverCancelBtn';
-
-          openModal({
-            title: `Run: ${checkName || 'Journey'}`,
-            subtitle: `Optional: stream journey steps into an existing operator room`,
-            html: `
-              <div style="display:flex; flex-direction:column; gap:10px;">
-                <div class="muted">
-                  If provided, the synthetic journey will send progress updates into this room so you can watch it live.
-                  You can paste either a room JID (e.g. <code>APPID_operator@conference.domain</code>) or a room name.
-                </div>
-                <label style="display:flex; flex-direction:column; gap:6px;">
-                  <div style="font-weight:700;">Observer room JID / name (optional)</div>
-                  <input id="${inputId}" placeholder="e.g. 6984..._operator@conference.xmpp.example.com" value="${escapeHtml(existing)}"
-                    style="padding:10px;border-radius:10px;border:1px solid rgba(127,127,127,0.35);background:transparent;" />
-                </label>
-                <div style="display:flex; gap:10px; justify-content:flex-end;">
-                  <button id="${cancelBtnId}">Cancel</button>
-                  <button id="${runBtnId}">Run</button>
-                </div>
-              </div>
-            `,
-          });
-
-          // Wire buttons inside the modal content
-          const runBtn = document.getElementById(runBtnId);
-          const cancelBtn = document.getElementById(cancelBtnId);
-          const input = document.getElementById(inputId);
-
-          const finish = (value) => {
-            try { closeModal(); } catch {}
-            resolve(value);
-          };
-
-          if (cancelBtn) cancelBtn.addEventListener('click', () => finish(null));
-          if (runBtn) runBtn.addEventListener('click', () => {
-            const v = (input && input.value ? String(input.value) : '').trim();
-            try { localStorage.setItem(key, v); } catch {}
-            finish(v);
-          });
-
-          // Enter submits
-          if (input) input.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-              const v = (input.value ? String(input.value) : '').trim();
-              try { localStorage.setItem(key, v); } catch {}
-              finish(v);
-            }
-          });
-        });
-      }
-
-      async function load() {
-        const r = await fetch('/api/summary');
-        const data = await r.json();
-        grid.innerHTML = '';
-        for (const inst of data.instances) {
-          const card = document.createElement('div');
-          card.className = 'card';
-          const critical = inst.checks.filter(c => (c.severity || 'critical') === 'critical');
-          const optional = inst.checks.filter(c => (c.severity || 'critical') !== 'critical');
-          const optionalCount = optional.length + 1; // + Push_validate manual action
-          const buildLine = inst.build
-            ? [
-                // Prefer date-based buildVersion (yy.mm.dd) if present; fallback to semantic version.
-                inst.build.buildVersion ? `v${inst.build.buildVersion}` : (inst.build.version ? `v${inst.build.version}` : null),
-                inst.build.commit ? `commit ${String(inst.build.commit).slice(0, 12)}` : null,
-                inst.build.time ? `${inst.build.time}` : null,
-              ].filter(Boolean).join(' · ')
-            : '';
-          card.innerHTML = `
-            <div style="display:flex;justify-content:space-between;gap:8px;">
-              <div>
-                <div style="font-weight:700;">${inst.name}</div>
-                <div class="muted">${inst.id}</div>
-                ${buildLine ? `<div class="muted">${buildLine}</div>` : ``}
-              </div>
-              <div class="status"><span class="dot ${statusToClass(inst.status)}"></span>${inst.status.toUpperCase()}</div>
-            </div>
-            <table>
-              <thead><tr><th>Check</th><th>Last</th><th>ms</th></tr></thead>
-              <tbody>
-                ${critical.map(c => `
-                  <tr>
-                    <td><a href="/history.html#${encodeURIComponent(c.id)}">${c.name}</a></td>
-                    <td>${c.ok ? 'OK' : ('FAIL' + (c.errorText ? ' ('+c.errorText+')' : ''))}${c.statusCode ? ' ('+c.statusCode+')' : ''}</td>
-                    <td>${c.durationMs ?? ''}</td>
-                  </tr>
-                `).join('')}
-              </tbody>
-            </table>
-            <details style="margin-top:10px;">
-              <summary class="muted">Optional checks (${optionalCount})</summary>
-              <table>
-                <thead><tr><th>Check</th><th>Last</th><th>ms</th><th></th></tr></thead>
-                <tbody>
-                  <tr>
-                    <td>Push_validate</td>
-                    <td class="muted">manual</td>
-                    <td></td>
-                    <td style="text-align:right; white-space:nowrap;">
-                      <button data-run="action:push_validate" data-run-kind="push_validate" data-instance="${escapeHtml(inst.id)}" data-name="Push_validate">Run</button>
-                      <button data-details="action:push_validate" data-details-kind="push_validate" data-instance="${escapeHtml(inst.id)}" data-name="Push_validate">Details</button>
-                    </td>
-                  </tr>
-                  ${optional.map(c => `
-                    <tr>
-                      <td><a href="/history.html#${encodeURIComponent(c.id)}">${c.name}</a></td>
-                      <td>${c.ok ? 'OK' : ('FAIL' + (c.errorText ? ' ('+c.errorText+')' : ''))}${c.statusCode ? ' ('+c.statusCode+')' : ''}</td>
-                      <td>${c.durationMs ?? ''}</td>
-                      <td style="text-align:right; white-space:nowrap;">
-                        ${c.type === 'journey' ? `<button data-run="${c.id}" data-run-kind="journey" data-instance="${escapeHtml(inst.id)}" data-name="${escapeHtml(c.name)}">Run</button>` : ''}
-                        ${c.type === 'push_validate' ? `<button data-run="${c.id}" data-run-kind="push_validate" data-instance="${escapeHtml(inst.id)}" data-name="${escapeHtml(c.name)}">Run</button>` : ''}
-                        <button data-details="${c.id}" data-name="${escapeHtml(c.name)}">Details</button>
-                      </td>
-                    </tr>
-                  `).join('')}
-                </tbody>
-              </table>
-            </details>
-          `;
-          grid.appendChild(card);
+        const isJourney = Array.isArray(details?.steps) || typeof details?.error === 'string';
+        let body;
+        if (isJourney) {
+          body = renderJourneySteps({ ...details, ok, durationMs }, run);
+        } else {
+          body = `${pills}${err}<details style="margin-top:10px;"><summary class="modalSub">Raw run</summary><pre style="white-space:pre-wrap; font-size:12px; opacity:0.9;">${escapeHtml(JSON.stringify(run, null, 2))}</pre></details>`;
         }
-        updatedAt.textContent = 'Updated: ' + new Date().toLocaleTimeString();
-
-        // Wire \"Run\" buttons
-        document.querySelectorAll('button[data-run]').forEach((btn) => {
-          // NOTE:
-          // Avoid relying on `event.currentTarget` across `await` boundaries.
-          // Some browsers reset it to null after the handler yields, which can break
-          // toggling button.disabled in finally blocks.
-          btn.addEventListener('click', async () => {
-            const checkId = btn.getAttribute('data-run');
-            if (!checkId) return;
-            const checkName = btn.getAttribute('data-name') || 'Journey';
-            const oldText = btn.textContent || 'Run';
-            const kind = btn.getAttribute('data-run-kind') || '';
-            const instanceId = btn.getAttribute('data-instance') || '';
-            let journeyObserverRoom = '';
-            if (kind === 'journey') {
-              const v = await askJourneyObserverRoom(checkName);
-              if (v === null) return;
-              journeyObserverRoom = v || '';
-            }
-            btn.disabled = true;
-            try {
-              btn.textContent = 'Running...';
-              if (kind === 'push_validate') {
-                // Prefer /api/run-check if configured; fallback to manual action.
-                let json = null;
-                let ranVia = '';
-                try {
-                  const resp = await fetch('/api/run-check', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ checkId }),
-                  });
-                  json = await resp.json().catch(() => null);
-                  if (resp.ok && json?.run) {
-                    ranVia = 'run-check';
-                  } else {
-                    json = null;
-                  }
-                } catch {
-                  json = null;
-                }
-
-                if (!json) {
-                  ranVia = 'action';
-                  const resp = await fetch('/api/actions/push-validate', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ instanceId }),
-                  });
-                  json = await resp.json().catch(() => null);
-                }
-
-                if (json?.run) {
-                  const title = instanceId ? `${checkName} (${instanceId})` : checkName;
-                  const id = json.actionId || checkId;
-                  renderRunDetails(title, id, json.run);
-                  if (ranVia === 'action') {
-                    try { localStorage.setItem(`push_validate:lastRun:${instanceId || 'default'}`, JSON.stringify({ title, id, run: json.run })); } catch {}
-                  }
-                } else {
-                  openModal({
-                    title: checkName,
-                    subtitle: checkId,
-                    html: `<div class="muted">No response body.</div><pre style="white-space:pre-wrap; font-size:12px;">${escapeHtml(JSON.stringify(json, null, 2))}</pre>`,
-                  });
-                }
-              } else {
-                const resp = await fetch('/api/run-check', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ checkId, journeyObserverRoom: journeyObserverRoom || undefined }),
-                });
-                const json = await resp.json().catch(() => null);
-                if (json?.run) {
-                  renderRunDetails(checkName, checkId, json.run);
-                } else {
-                  openModal({
-                    title: checkName,
-                    subtitle: checkId,
-                    html: `<div class="muted">No response body.</div>`,
-                  });
-                }
-              }
-            } finally {
-              btn.disabled = false;
-              btn.textContent = oldText;
-              load().catch(() => {});
-            }
-          });
-        });
-
-        // Wire \"Details\" buttons
-        document.querySelectorAll('button[data-details]').forEach((btn) => {
-          btn.addEventListener('click', async () => {
-            const checkId = btn.getAttribute('data-details');
-            if (!checkId) return;
-            const checkName = btn.getAttribute('data-name') || 'Check';
-            const oldText = btn.textContent || 'Details';
-            const kind = btn.getAttribute('data-details-kind') || '';
-            const instanceId = btn.getAttribute('data-instance') || '';
-            btn.disabled = true;
-            try {
-              btn.textContent = 'Loading...';
-              if (kind === 'push_validate') {
-                let v = null;
-                try { v = localStorage.getItem(`push_validate:lastRun:${instanceId || 'default'}`); } catch {}
-                if (v) {
-                  try {
-                    const parsed = JSON.parse(v);
-                    if (parsed?.run) {
-                      renderRunDetails(parsed.title || checkName, parsed.id || checkId, parsed.run);
-                      return;
-                    }
-                  } catch {}
-                }
-                openModal({
-                  title: checkName,
-                  subtitle: instanceId || '',
-                  html: `<div class="muted">No saved run yet. Click <b>Run</b> to execute the push validation.</div>`,
-                });
-                return;
-              }
-              const resp = await fetch(`/api/last-run?checkId=${encodeURIComponent(checkId)}`);
-              const json = await resp.json().catch(() => null);
-              if (json?.run) {
-                renderRunDetails(checkName, checkId, json.run);
-              } else {
-                openModal({
-                  title: checkName,
-                  subtitle: checkId,
-                  html: `<div class="muted">No run data.</div><pre style="white-space:pre-wrap; font-size:12px;">${escapeHtml(JSON.stringify(json, null, 2))}</pre>`,
-                });
-              }
-            } finally {
-              btn.disabled = false;
-              btn.textContent = oldText;
-            }
-          });
-        });
+        openModal({ title: checkName || 'Check details', subtitle: checkId || '', html: body });
       }
 
-      refreshBtn.addEventListener('click', () => load().catch(console.error));
-      load().catch(console.error);
-      setInterval(() => load().catch(() => {}), 15000);
+      function renderJourneySteps(details, run) {
+        const steps = Array.isArray(details?.steps) ? details.steps : [];
+        const errorMsg = details?.error || '';
+        const cleanupErrors = Array.isArray(details?.cleanup?.errors) ? details.cleanup.errors : [];
+
+        // Compute deltas in ms between consecutive steps
+        const stepRows = steps.map((s, i) => {
+          const name = s?.name || '';
+          const isError = name === 'error';
+          const isOk = name === 'ok';
+          const dotClass = isError ? 'red' : isOk ? 'green' : 'gray';
+          const delta = (i > 0 && steps[i-1]?.ts && s?.ts) ? (new Date(s.ts).getTime() - new Date(steps[i-1].ts).getTime()) : null;
+          const extraJson = Object.keys(s || {}).filter(k => !['name','ts','message'].includes(k)).reduce((acc, k) => { acc[k] = s[k]; return acc; }, {});
+          const extraStr = Object.keys(extraJson).length ? ` <span class="modalSub">${escapeHtml(JSON.stringify(extraJson))}</span>` : '';
+          const msg = isError && s?.message ? `<div class="modalSub" style="color: var(--red);">${escapeHtml(s.message)}</div>` : '';
+          return `
+            <div class="stepRow">
+              <span class="dot ${dotClass}"></span>
+              <div class="stepName">${escapeHtml(name)}${extraStr}${msg}</div>
+              <div class="stepDelta">${delta != null ? '+' + delta + 'ms' : ''}</div>
+              <div class="stepTs">${escapeHtml(s?.ts ? new Date(s.ts).toLocaleTimeString() : '')}</div>
+            </div>
+          `;
+        }).join('');
+
+        const headerPills = `
+          <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:10px;">
+            <span class="pill"><span class="dot ${details?.ok ? 'green' : 'red'}"></span>${details?.ok ? 'OK' : 'FAIL'}</span>
+            ${details?.durationMs != null ? `<span class="pill">${escapeHtml(details.durationMs)} ms total</span>` : ''}
+            ${details?.appId ? `<span class="pill">appId ${escapeHtml(details.appId)}${details?.appReused ? ' (reused)' : ' (created)'}</span>` : ''}
+            ${details?.mode ? `<span class="pill">mode ${escapeHtml(details.mode)}</span>` : ''}
+            ${errorMsg ? `<span class="pill" style="color: var(--red);">error: ${escapeHtml(errorMsg)}</span>` : ''}
+          </div>
+        `;
+
+        const cleanupBlock = cleanupErrors.length ? `
+          <div style="margin-top:14px; padding:10px; border:1px solid var(--amber); border-radius:8px;">
+            <div style="font-weight:700; color: var(--amber); margin-bottom:6px;">Cleanup left items behind</div>
+            <ul style="margin:0; padding-left:18px;">
+              ${cleanupErrors.map(e => `<li><b>${escapeHtml(e.stage)}</b>: <span class="modalSub">${escapeHtml(e.message)}</span></li>`).join('')}
+            </ul>
+          </div>
+        ` : '';
+
+        const raw = `<details style="margin-top:14px;"><summary class="modalSub">Raw run JSON</summary><pre style="white-space:pre-wrap; font-size:12px; opacity:0.9;">${escapeHtml(JSON.stringify(run, null, 2))}</pre></details>`;
+        return headerPills + (stepRows || '<div class="modalSub">No steps captured.</div>') + cleanupBlock + raw;
+      }
+
+      // ---------- Render: grid ----------
+      function render(data) {
+        if (!data) return;
+        renderRollup(data);
+        renderFilterChips(data);
+
+        const visible = (data.instances || []).filter(passesFilters);
+        grid.innerHTML = '';
+        if (!visible.length) {
+          emptyState.style.display = 'block';
+        } else {
+          emptyState.style.display = 'none';
+          for (const inst of visible) grid.appendChild(buildCard(inst));
+        }
+        attachRowHandlers();
+        // Lazy-load sparklines
+        for (const host of grid.querySelectorAll('.spark-host')) {
+          const tr = host.closest('tr');
+          const checkId = tr?.getAttribute('data-check-id');
+          if (checkId) loadSparkline(checkId, host);
+        }
+      }
+
+      // ---------- Data load ----------
+      async function load() {
+        try {
+          const r = await fetch('/api/summary', { cache: 'no-store' });
+          const data = await r.json();
+          state.lastSummary = data;
+          render(data);
+          state.countdown = REFRESH_MS / 1000;
+        } catch (e) {
+          console.error('summary load failed', e);
+        }
+      }
+
+      function tickCountdown() {
+        if (!state.autoRefresh) return;
+        state.countdown = Math.max(0, state.countdown - 1);
+        const cd = document.getElementById('countdown');
+        if (cd) cd.textContent = `↻ ${state.countdown}s`;
+        if (state.countdown <= 0) {
+          load();
+        }
+      }
+
+      // ---------- Header buttons ----------
+      refreshBtn.addEventListener('click', () => load());
+      pauseBtn.addEventListener('click', () => {
+        state.autoRefresh = !state.autoRefresh;
+        pauseBtn.textContent = state.autoRefresh ? 'Pause' : 'Resume';
+        const cd = document.getElementById('countdown');
+        if (cd) cd.textContent = state.autoRefresh ? `↻ ${state.countdown}s` : '⏸ paused';
+      });
+      themeBtn.addEventListener('click', () => {
+        const order = ['dark', 'light', 'wallboard'];
+        state.theme = order[(order.indexOf(state.theme) + 1) % order.length];
+        try { localStorage.setItem('ethoraUptime.theme', state.theme); } catch {}
+        applyTheme();
+        if (state.lastSummary) renderRollup(state.lastSummary);
+      });
+      disabledToggleBtn.addEventListener('click', () => {
+        state.showDisabled = !state.showDisabled;
+        disabledToggleBtn.textContent = state.showDisabled ? 'Hide disabled' : 'Show disabled';
+        if (state.lastSummary) render(state.lastSummary);
+      });
+
+      // ---------- Boot ----------
+      load();
+      state.countdownTimer = setInterval(tickCountdown, 1000);
     </script>
   </body>
 </html>
-
-

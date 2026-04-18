@@ -7,6 +7,14 @@ import { client as xmppClient, xml } from '@xmpp/client'
 import http from 'node:http'
 import https from 'node:https'
 
+// `@xmpp/client` (in browser/websocket transport mode) looks up `globalThis.WebSocket`.
+// Node 20 doesn't expose this as a global, so the xmpp_muc_echo / journey checks would
+// fail with "WebSocket is not defined". Polyfill once at module load. Node 21+ exposes
+// a built-in global WebSocket, so only set ours if it's missing.
+if (typeof (globalThis as any).WebSocket === 'undefined') {
+  (globalThis as any).WebSocket = WebSocket
+}
+
 export type CheckRunResult = {
   ok: boolean
   statusCode?: number

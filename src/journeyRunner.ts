@@ -1,12 +1,41 @@
 // Ethora.com platform, copyright: Dappros Ltd (c) 2026, all rights reserved
 import crypto from 'node:crypto'
+import { WebSocket as WsImpl } from 'ws'
 import { client as xmppClient, xml } from '@xmpp/client'
+
+// `@xmpp/client`'s websocket transport reads `globalThis.WebSocket`. Node 20 has no
+// built-in global WebSocket, so polyfill once. Idempotent and safe on Node 21+.
+if (typeof (globalThis as any).WebSocket === 'undefined') {
+  (globalThis as any).WebSocket = WsImpl
+}
+
+// Synthetic-app contract (must be kept in sync with the backend's
+// `isSyntheticTestApp` helper in createAppV1.service.js):
+// - The backend recognises any app whose displayName starts with `__uptime__`
+//   as a synthetic test app and SKIPS marketing/analytics side-effects
+//   (HubSpot/Slack/etc.) for it.
+// - We use stable display names per journey "mode" so each enabled mode
+//   only ever occupies a single slot in the admin Apps list (instead of
+//   creating a fresh app per run).
+//
+// IMPORTANT: do not include random suffixes in these names — uniqueness for
+// per-run isolation is achieved at the user/chat level (suffixed emails and
+// chat UUIDs) inside the same shared synthetic app.
+export const SYNTHETIC_APP_DISPLAY_NAME_PREFIX = '__uptime__'
+export const SYNTHETIC_APP_DISPLAY_NAME_BASIC = '__uptime__journey'
+export const SYNTHETIC_APP_DISPLAY_NAME_ADVANCED = '__uptime__journey'
+export const SYNTHETIC_APP_DISPLAY_NAME_B2B = '__uptime__journey_b2b'
+
+// Stable header so a server admin can also distinguish these calls in logs/proxy rules.
+const SYNTHETIC_HEADERS: Record<string, string> = { 'x-ethora-synthetic': '1' }
 
 export type JourneyEnv = {
   ethoraApiBase: string
   baseDomainName: string
   adminEmail: string
   adminPassword: string
+  // Retained for backwards compatibility with existing uptime.env files; no longer
+  // used to mint new app names — synthetic apps now have stable display names.
   appNamePrefix: string
   usersCount: number
 }
@@ -143,6 +172,155 @@ function getResultObject(input: any) {
   return input?.result || input?.app || input
 }
 
+type SyntheticAppRef = {
+  appId: string
+  appToken: string
+  reused: boolean
+}
+
+// Find a previously-created synthetic app by exact displayName; create it on first run.
+// `ownerToken` must be a user JWT (Bearer) that owns / can read+create apps.
+// Cleanup callers should preserve the returned app (only delete users/chats inside it).
+async function findOrCreateSyntheticAppV1(
+  apiBase: string,
+  ownerToken: string,
+  displayName: string
+): Promise<SyntheticAppRef> {
+  // Try to find an existing app first. Page through results in case the user
+  // owns many apps; prefer exact displayName match.
+  const limit = 100
+  let offset = 0
+  for (let page = 0; page < 5; page++) {
+    const list = await httpJson(
+      'GET',
+      `${apiBase}/v1/apps?limit=${limit}&offset=${offset}&orderBy=displayName&order=asc`,
+      { Authorization: `Bearer ${ownerToken}`, ...SYNTHETIC_HEADERS }
+    )
+    if (!list.resp.ok) break
+    const apps = Array.isArray(list.json?.apps) ? list.json.apps : []
+    const match = apps.find((a: any) => String(a?.displayName || '') === displayName)
+    if (match) {
+      const id = String(match?._id || match?.id || '').trim()
+      const token = String(match?.appToken || '').trim()
+      if (id && token) {
+        return { appId: id, appToken: token, reused: true }
+      }
+      // Found by name but missing token (legacy data); fall through to create-or-recover.
+      break
+    }
+    if (apps.length < limit) break
+    offset += limit
+  }
+
+  // Create the synthetic app. The backend recognises the `__uptime__` prefix
+  // and skips HubSpot/Slack/etc. side-effects (see createAppV1.service.js).
+  const created = await httpJson(
+    'POST',
+    `${apiBase}/v1/apps`,
+    { Authorization: `Bearer ${ownerToken}`, ...SYNTHETIC_HEADERS },
+    { displayName }
+  )
+  if (!created.resp.ok) {
+    // If the app exists but our list paging missed it (e.g. due to ACL limits or
+    // a race with another runner), try a final lookup before giving up.
+    if ([409, 422, 500].includes(created.resp.status)) {
+      const retry = await httpJson(
+        'GET',
+        `${apiBase}/v1/apps?limit=${limit}&offset=0&orderBy=displayName&order=asc`,
+        { Authorization: `Bearer ${ownerToken}`, ...SYNTHETIC_HEADERS }
+      )
+      if (retry.resp.ok) {
+        const apps2 = Array.isArray(retry.json?.apps) ? retry.json.apps : []
+        const match2 = apps2.find((a: any) => String(a?.displayName || '') === displayName)
+        if (match2?._id && match2?.appToken) {
+          return { appId: String(match2._id), appToken: String(match2.appToken), reused: true }
+        }
+      }
+    }
+    throw new Error(`create synthetic app failed: ${created.resp.status} ${created.text}`)
+  }
+
+  const appObj = created.json?.app || created.json?.result?.app || created.json?.result || created.json
+  const id = String(appObj?._id || appObj?.id || '').trim()
+  const token = String(appObj?.appToken || '').trim()
+  if (!id) throw new Error('create synthetic app: missing app._id')
+  if (!token) throw new Error('create synthetic app: missing app.appToken')
+  return { appId: id, appToken: token, reused: false }
+}
+
+// V2 / B2B variant: list child apps under the parent tenant, then create one if missing.
+async function findOrCreateSyntheticAppV2(
+  apiBase: string,
+  parentServerToken: string,
+  displayName: string
+): Promise<SyntheticAppRef> {
+  const limit = 100
+  let offset = 0
+  for (let page = 0; page < 5; page++) {
+    const list = await httpJson(
+      'GET',
+      `${apiBase}/v2/apps?limit=${limit}&offset=${offset}&orderBy=displayName&order=asc`,
+      { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS }
+    )
+    if (!list.resp.ok) break
+    const items = Array.isArray(list.json?.items) ? list.json.items
+      : Array.isArray(list.json?.apps) ? list.json.apps
+      : []
+    const match = items.find((a: any) => String(a?.displayName || '') === displayName)
+    if (match) {
+      const id = String(match?._id || match?.id || '').trim()
+      // v2 list does not necessarily return the appToken; resolve via /v2/apps/:id if needed.
+      let token = String(match?.appToken || '').trim()
+      if (id && !token) {
+        const detail = await httpJson(
+          'GET',
+          `${apiBase}/v2/apps/${encodeURIComponent(id)}`,
+          { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS }
+        )
+        if (detail.resp.ok) {
+          const obj = getResultObject(detail.json)
+          token = String(obj?.appToken || '').trim()
+        }
+      }
+      if (id && token) {
+        return { appId: id, appToken: token, reused: true }
+      }
+      break
+    }
+    if (items.length < limit) break
+    offset += limit
+  }
+
+  const created = await httpJson(
+    'POST',
+    `${apiBase}/v2/apps`,
+    { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS },
+    { displayName }
+  )
+  if (!created.resp.ok) {
+    throw new Error(`create synthetic b2b app failed: ${created.resp.status} ${created.text}`)
+  }
+  const appObj = created.json?.app || created.json?.result?.app || created.json?.result || created.json
+  const id = String(appObj?._id || appObj?.id || '').trim()
+  const token = String(appObj?.appToken || '').trim()
+  if (!id) throw new Error('create synthetic b2b app: missing app._id')
+  // v2 create may not return token directly — fetch detail.
+  let resolvedToken = token
+  if (!resolvedToken) {
+    const detail = await httpJson(
+      'GET',
+      `${apiBase}/v2/apps/${encodeURIComponent(id)}`,
+      { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS }
+    )
+    if (detail.resp.ok) {
+      const obj = getResultObject(detail.json)
+      resolvedToken = String(obj?.appToken || '').trim()
+    }
+  }
+  if (!resolvedToken) throw new Error('create synthetic b2b app: missing app.appToken')
+  return { appId: id, appToken: resolvedToken, reused: false }
+}
+
 async function pollUserBatchJob(apiBase: string, appId: string, authToken: string, jobId: string, timeoutMs = 120000) {
   const startedAt = Date.now()
   while (Date.now() - startedAt < timeoutMs) {
@@ -165,30 +343,33 @@ export async function runJourney(env: JourneyEnv, opts?: JourneyOptions): Promis
   if (mode === 'b2b') return await runJourneyB2B(env)
   if (mode === 'advanced') return await runJourneyAdvanced(env, opts)
 
+  // Per-run uniqueness happens at the user/chat level (suffixed emails + UUIDs).
+  // The synthetic app itself is reused across runs to keep the admin Apps list quiet
+  // and to avoid HubSpot/Slack noise on each run.
   const suffix = randSuffix()
-  const appDisplayName = `${env.appNamePrefix}-${suffix}`
+  const appDisplayName = SYNTHETIC_APP_DISPLAY_NAME_BASIC
 
   const details: Record<string, any> = {
     suffix,
     appDisplayName,
     mode: 'basic',
     steps: [],
+    cleanup: { errors: [] as Array<{ stage: string; message: string }> },
   }
 
   let ownerUserToken: string | null = null
-  let newAppId: string | null = null
-  let newAppToken: string | null = null
+  let syntheticApp: SyntheticAppRef | null = null
   const createdUserIds: string[] = []
   const createdUserXmpp: string[] = []
   let chatName: string | null = null
   let chatOwnerToken: string | null = null
-  let chatOwnerXmpp: string | null = null
-  let chatOwnerXmppPassword: string | null = null
 
   const step = (name: string, extra?: any) => details.steps.push({ name, ...extra, ts: new Date().toISOString() })
+  const cleanupErr = (stage: string, e: any) => {
+    details.cleanup.errors.push({ stage, message: e?.message || String(e) })
+  }
 
   try {
-    // 0) Get base app config -> appToken
     step('get_base_app_config')
     const cfgResp = await httpJson(
       'GET',
@@ -207,7 +388,6 @@ export async function runJourney(env: JourneyEnv, opts?: JourneyOptions): Promis
       cfgResp.json?.result?.app?.appToken
     if (!baseAppToken) throw new Error('get-config: missing appToken in response')
 
-    // 0.1) Login admin user (app auth)
     step('login_admin_user')
     const loginResp = await httpJson(
       'POST',
@@ -219,23 +399,14 @@ export async function runJourney(env: JourneyEnv, opts?: JourneyOptions): Promis
     ownerUserToken = loginResp.json?.token
     if (!ownerUserToken) throw new Error('login-with-email: missing token')
 
-    // 1) Create app (user auth)
-    step('create_app')
-    const createAppResp = await httpJson(
-      'POST',
-      `${env.ethoraApiBase}/v1/apps`,
-      { Authorization: `Bearer ${ownerUserToken}` },
-      { displayName: appDisplayName }
-    )
-    if (!createAppResp.resp.ok) throw new Error(`create app failed: ${createAppResp.resp.status} ${createAppResp.text}`)
+    step('find_or_create_synthetic_app', { displayName: appDisplayName })
+    syntheticApp = await findOrCreateSyntheticAppV1(env.ethoraApiBase, ownerUserToken, appDisplayName)
+    details.appId = syntheticApp.appId
+    details.appReused = syntheticApp.reused
+    step(syntheticApp.reused ? 'synthetic_app_reused' : 'synthetic_app_created', { appId: syntheticApp.appId })
 
-    const appObj = createAppResp.json?.app
-    newAppId = appObj?._id || appObj?.id
-    newAppToken = appObj?.appToken
-    if (!newAppId) throw new Error('create app: missing app._id')
-    if (!newAppToken) throw new Error('create app: missing app.appToken')
+    const newAppToken = syntheticApp.appToken
 
-    // 2) Create end users via v2 signup (app auth), then login via v2 to get user JWTs
     for (let i = 0; i < env.usersCount; i++) {
       step('signup_user_v2', { i })
       const email = `uptime-${suffix}-${i}@example.com`
@@ -256,28 +427,25 @@ export async function runJourney(env: JourneyEnv, opts?: JourneyOptions): Promis
       if (!signupResp.resp.ok) throw new Error(`signup v2 failed: ${signupResp.resp.status} ${signupResp.text}`)
 
       step('login_user_v2', { i })
-      const loginResp = await httpJson(
+      const loginRespV2 = await httpJson(
         'POST',
         `${env.ethoraApiBase}/v2/users/login-with-email`,
         { Authorization: String(newAppToken) },
         { email, password }
       )
-      if (!loginResp.resp.ok) throw new Error(`login v2 failed: ${loginResp.resp.status} ${loginResp.text}`)
-      const user = loginResp.json?.user
-      const token = loginResp.json?.token
+      if (!loginRespV2.resp.ok) throw new Error(`login v2 failed: ${loginRespV2.resp.status} ${loginRespV2.text}`)
+      const user = loginRespV2.json?.user
+      const token = loginRespV2.json?.token
       if (!user?._id) throw new Error('login v2: missing user._id')
       if (!token) throw new Error('login v2: missing token')
       createdUserIds.push(String(user._id))
       if (user?.xmppUsername) createdUserXmpp.push(String(user.xmppUsername))
       if (i === 0) {
         chatOwnerToken = String(token)
-        chatOwnerXmpp = String(user?.xmppUsername || '')
-        chatOwnerXmppPassword = String(user?.xmppPassword || '')
       }
     }
     if (!chatOwnerToken) throw new Error('login v2: missing token for first user')
 
-    // 3) Create chat (user auth, within new app)
     step('create_chat')
     const createChatResp = await httpJson(
       'POST',
@@ -295,7 +463,6 @@ export async function runJourney(env: JourneyEnv, opts?: JourneyOptions): Promis
     chatName = createChatResp.json?.result?.name
     if (!chatName) throw new Error('create chat: missing result.name')
 
-    // 4) Add second user to chat (if present)
     if (createdUserXmpp.length > 1) {
       step('chat_add_user')
       const addResp = await httpJson(
@@ -313,77 +480,76 @@ export async function runJourney(env: JourneyEnv, opts?: JourneyOptions): Promis
     step('error', { message: e?.message || String(e) })
     return { ok: false, details: { ...details, error: e?.message || String(e) } }
   } finally {
-    // Cleanup (best-effort)
+    // Cleanup (best-effort): delete users + chat created in THIS run.
+    // The synthetic app itself is preserved so admin/HubSpot don't see churn.
     if (chatName && chatOwnerToken) {
       try {
         step('cleanup_delete_chat')
-        await httpJson(
+        const r = await httpJson(
           'DELETE',
           `${env.ethoraApiBase}/v1/chats`,
           { Authorization: `Bearer ${chatOwnerToken}`, 'Content-Type': 'application/json' },
           { name: chatName }
         )
-      } catch {}
+        if (!r.resp.ok) cleanupErr('delete_chat', new Error(`status=${r.resp.status} ${r.text}`))
+      } catch (e) { cleanupErr('delete_chat', e) }
     }
 
-    if (newAppId && ownerUserToken && createdUserIds.length) {
+    if (syntheticApp?.appId && ownerUserToken && createdUserIds.length) {
       try {
         step('cleanup_delete_users')
-        await httpJson(
+        const r = await httpJson(
           'POST',
-          `${env.ethoraApiBase}/v1/users/delete-many-with-app-id/${encodeURIComponent(String(newAppId))}`,
+          `${env.ethoraApiBase}/v1/users/delete-many-with-app-id/${encodeURIComponent(String(syntheticApp.appId))}`,
           { Authorization: `Bearer ${ownerUserToken}` },
           { usersIdList: createdUserIds }
         )
-      } catch {}
+        if (!r.resp.ok) cleanupErr('delete_users', new Error(`status=${r.resp.status} ${r.text}`))
+      } catch (e) { cleanupErr('delete_users', e) }
     }
-
-    if (newAppId && ownerUserToken) {
-      try {
-        step('cleanup_delete_app')
-        await httpJson('DELETE', `${env.ethoraApiBase}/v1/apps/${encodeURIComponent(String(newAppId))}`, { Authorization: `Bearer ${ownerUserToken}` })
-      } catch {}
-    }
+    // NOTE: synthetic app intentionally NOT deleted.
   }
 }
 
 async function runJourneyB2B(env: JourneyEnv): Promise<JourneyResult> {
+  // Per-run uniqueness happens at user/chat level (UUIDs include the suffix).
+  // The synthetic child app is reused across runs (Option A+C).
   const suffix = randSuffix()
-  const appDisplayName = `${env.appNamePrefix}-b2b-${suffix}`
+  const appDisplayName = SYNTHETIC_APP_DISPLAY_NAME_B2B
   const details: Record<string, any> = {
     suffix,
     appDisplayName,
     mode: 'b2b',
     steps: [],
+    cleanup: { errors: [] as Array<{ stage: string; message: string }> },
   }
 
   const b2b = getB2BEnvFromProcess()
   const parentServerToken = createServerToken(b2b.appId, b2b.appSecret)
   const step = (name: string, extra?: any) => details.steps.push({ name, ...extra, ts: new Date().toISOString() })
+  const cleanupErr = (stage: string, e: any) => {
+    details.cleanup.errors.push({ stage, message: e?.message || String(e) })
+  }
 
+  let syntheticApp: SyntheticAppRef | null = null
   let createdAppId: string | null = null
   let createdChatName: string | null = null
   const createdUserUuids: string[] = []
   let createdTokenId: string | null = null
 
   try {
-    step('create_app_v2')
-    const createAppResp = await httpJson(
-      'POST',
-      `${env.ethoraApiBase}/v2/apps`,
-      { Authorization: `Bearer ${parentServerToken}` },
-      { displayName: appDisplayName }
-    )
-    if (!createAppResp.resp.ok) throw new Error(`create app failed: ${createAppResp.resp.status} ${createAppResp.text}`)
-    const createdApp = getResultObject(createAppResp.json?.app ? createAppResp.json : createAppResp.json?.result ? createAppResp.json : createAppResp.json)
-    createdAppId = String(createdApp?._id || createdApp?.id || createAppResp.json?.app?._id || '').trim()
-    if (!createdAppId) throw new Error('create app: missing app id')
+    step('find_or_create_synthetic_app_v2', { displayName: appDisplayName })
+    syntheticApp = await findOrCreateSyntheticAppV2(env.ethoraApiBase, parentServerToken, appDisplayName)
+    createdAppId = syntheticApp.appId
+    details.appId = syntheticApp.appId
+    details.appReused = syntheticApp.reused
+    step(syntheticApp.reused ? 'synthetic_app_reused' : 'synthetic_app_created', { appId: syntheticApp.appId })
 
     step('list_apps_v2')
     const listAppsResp = await httpJson(
       'GET',
       `${env.ethoraApiBase}/v2/apps?limit=20&offset=0`,
-      { Authorization: `Bearer ${parentServerToken}` }
+      { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS }
     )
     if (!listAppsResp.resp.ok) throw new Error(`list apps failed: ${listAppsResp.resp.status} ${listAppsResp.text}`)
 
@@ -391,7 +557,7 @@ async function runJourneyB2B(env: JourneyEnv): Promise<JourneyResult> {
     const getAppResp = await httpJson(
       'GET',
       `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}`,
-      { Authorization: `Bearer ${parentServerToken}` }
+      { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS }
     )
     if (!getAppResp.resp.ok) throw new Error(`get app failed: ${getAppResp.resp.status} ${getAppResp.text}`)
 
@@ -399,7 +565,7 @@ async function runJourneyB2B(env: JourneyEnv): Promise<JourneyResult> {
     const createTokenResp = await httpJson(
       'POST',
       `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/tokens`,
-      { Authorization: `Bearer ${parentServerToken}` },
+      { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS },
       { label: `uptime-${suffix}` }
     )
     if (!createTokenResp.resp.ok) throw new Error(`create app token failed: ${createTokenResp.resp.status} ${createTokenResp.text}`)
@@ -501,7 +667,7 @@ async function runJourneyB2B(env: JourneyEnv): Promise<JourneyResult> {
     const deleteChatResp = await httpJson(
       'DELETE',
       `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/chats`,
-      { Authorization: `Bearer ${parentServerToken}` },
+      { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS },
       { name: createdChatName }
     )
     if (!deleteChatResp.resp.ok) throw new Error(`delete chat failed: ${deleteChatResp.resp.status} ${deleteChatResp.text}`)
@@ -512,20 +678,15 @@ async function runJourneyB2B(env: JourneyEnv): Promise<JourneyResult> {
       const deleteTokenResp = await httpJson(
         'DELETE',
         `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/tokens/${encodeURIComponent(createdTokenId)}`,
-        { Authorization: `Bearer ${parentServerToken}` }
+        { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS }
       )
       if (!deleteTokenResp.resp.ok) throw new Error(`delete app token failed: ${deleteTokenResp.resp.status} ${deleteTokenResp.text}`)
       createdTokenId = null
     }
 
-    step('delete_app_v2')
-    const deleteAppResp = await httpJson(
-      'DELETE',
-      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}`,
-      { Authorization: `Bearer ${parentServerToken}` }
-    )
-    if (!deleteAppResp.resp.ok) throw new Error(`delete app failed: ${deleteAppResp.resp.status} ${deleteAppResp.text}`)
-    createdAppId = null
+    // NOTE: Do NOT delete the synthetic child app — we reuse it across runs to
+    // keep the admin Apps list (and analytics) quiet. The next run finds it
+    // by displayName via findOrCreateSyntheticAppV2().
 
     step('ok')
     return { ok: true, details }
@@ -536,48 +697,41 @@ async function runJourneyB2B(env: JourneyEnv): Promise<JourneyResult> {
     if (createdChatName && createdAppId) {
       try {
         step('cleanup_delete_chat_v2')
-        await httpJson(
+        const r = await httpJson(
           'DELETE',
           `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/chats`,
-          { Authorization: `Bearer ${parentServerToken}` },
+          { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS },
           { name: createdChatName }
         )
-      } catch {}
+        if (!r.resp.ok) cleanupErr('delete_chat_v2', new Error(`status=${r.resp.status} ${r.text}`))
+      } catch (e) { cleanupErr('delete_chat_v2', e) }
     }
 
     if (createdUserUuids.length && createdAppId) {
       try {
         step('cleanup_delete_users_batch_v2')
-        await httpJson(
+        const r = await httpJson(
           'DELETE',
           `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/users/batch`,
-          { Authorization: `Bearer ${parentServerToken}` },
+          { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS },
           { usersIdList: createdUserUuids }
         )
-      } catch {}
+        if (!r.resp.ok) cleanupErr('delete_users_v2', new Error(`status=${r.resp.status} ${r.text}`))
+      } catch (e) { cleanupErr('delete_users_v2', e) }
     }
 
     if (createdTokenId && createdAppId) {
       try {
         step('cleanup_delete_app_token_v2')
-        await httpJson(
+        const r = await httpJson(
           'DELETE',
           `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/tokens/${encodeURIComponent(createdTokenId)}`,
-          { Authorization: `Bearer ${parentServerToken}` }
+          { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS }
         )
-      } catch {}
+        if (!r.resp.ok) cleanupErr('delete_token_v2', new Error(`status=${r.resp.status} ${r.text}`))
+      } catch (e) { cleanupErr('delete_token_v2', e) }
     }
-
-    if (createdAppId) {
-      try {
-        step('cleanup_delete_app_v2')
-        await httpJson(
-          'DELETE',
-          `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}`,
-          { Authorization: `Bearer ${parentServerToken}` }
-        )
-      } catch {}
-    }
+    // NOTE: synthetic child app intentionally preserved.
   }
 }
 
@@ -662,19 +816,23 @@ async function waitForRoomMessage(xmpp: any, roomJid: string, bodyMatch: string,
 
 async function runJourneyAdvanced(env: JourneyEnv, opts?: JourneyOptions): Promise<JourneyResult> {
   const suffix = randSuffix()
-  const appDisplayName = `${env.appNamePrefix}-${suffix}`
+  // Reuse the same synthetic app as the basic journey (single slot in admin panel).
+  const appDisplayName = SYNTHETIC_APP_DISPLAY_NAME_ADVANCED
   const details: Record<string, any> = {
     suffix,
     appDisplayName,
     mode: 'advanced',
     steps: [],
+    cleanup: { errors: [] as Array<{ stage: string; message: string }> },
   }
 
   const step = (name: string, extra?: any) => details.steps.push({ name, ...extra, ts: new Date().toISOString() })
+  const cleanupErr = (stage: string, e: any) => {
+    details.cleanup.errors.push({ stage, message: e?.message || String(e) })
+  }
 
   let ownerUserToken: string | null = null
-  let newAppId: string | null = null
-  let newAppToken: string | null = null
+  let syntheticApp: SyntheticAppRef | null = null
 
   const users: Array<{ email: string; password: string; token: string; xmppUsername: string; xmppPassword: string; id: string }> = []
   let testChatName: string | null = null
@@ -777,21 +935,13 @@ async function runJourneyAdvanced(env: JourneyEnv, opts?: JourneyOptions): Promi
     if (!ownerUserToken) throw new Error('login-with-email: missing token')
     notify('login_admin_user ok')
 
-    step('create_app')
-    const createAppResp = await httpJson(
-      'POST',
-      `${env.ethoraApiBase}/v1/apps`,
-      { Authorization: `Bearer ${ownerUserToken}` },
-      { displayName: appDisplayName }
-    )
-    if (!createAppResp.resp.ok) throw new Error(`create app failed: ${createAppResp.resp.status} ${createAppResp.text}`)
-
-    const appObj = createAppResp.json?.app
-    newAppId = appObj?._id || appObj?.id
-    newAppToken = appObj?.appToken
-    if (!newAppId) throw new Error('create app: missing app._id')
-    if (!newAppToken) throw new Error('create app: missing app.appToken')
-    notify(`create_app ok appId=${newAppId}`)
+    step('find_or_create_synthetic_app', { displayName: appDisplayName })
+    syntheticApp = await findOrCreateSyntheticAppV1(env.ethoraApiBase, ownerUserToken, appDisplayName)
+    details.appId = syntheticApp.appId
+    details.appReused = syntheticApp.reused
+    step(syntheticApp.reused ? 'synthetic_app_reused' : 'synthetic_app_created', { appId: syntheticApp.appId })
+    const newAppToken = syntheticApp.appToken
+    notify(`synthetic app ${syntheticApp.reused ? 'reused' : 'created'} appId=${syntheticApp.appId}`)
 
     const usersCount = Math.max(3, Number(env.usersCount || 3))
     for (let i = 0; i < usersCount; i++) {
@@ -989,32 +1139,30 @@ async function runJourneyAdvanced(env: JourneyEnv, opts?: JourneyOptions): Promi
     if (testChatName && users[0]?.token) {
       try {
         step('cleanup_delete_test_chat')
-        await httpJson('DELETE', `${env.ethoraApiBase}/v1/chats`, { Authorization: `Bearer ${users[0].token}`, 'Content-Type': 'application/json' }, { name: testChatName })
-      } catch {}
+        const r = await httpJson('DELETE', `${env.ethoraApiBase}/v1/chats`, { Authorization: `Bearer ${users[0].token}`, 'Content-Type': 'application/json' }, { name: testChatName })
+        if (!r.resp.ok) cleanupErr('delete_test_chat', new Error(`status=${r.resp.status} ${r.text}`))
+      } catch (e) { cleanupErr('delete_test_chat', e) }
     }
     if (validationChatName && users[0]?.token) {
       try {
         step('cleanup_delete_validation_chat')
-        await httpJson('DELETE', `${env.ethoraApiBase}/v1/chats`, { Authorization: `Bearer ${users[0].token}`, 'Content-Type': 'application/json' }, { name: validationChatName })
-      } catch {}
+        const r = await httpJson('DELETE', `${env.ethoraApiBase}/v1/chats`, { Authorization: `Bearer ${users[0].token}`, 'Content-Type': 'application/json' }, { name: validationChatName })
+        if (!r.resp.ok) cleanupErr('delete_validation_chat', new Error(`status=${r.resp.status} ${r.text}`))
+      } catch (e) { cleanupErr('delete_validation_chat', e) }
     }
-    if (newAppId && ownerUserToken && users.length) {
+    if (syntheticApp?.appId && ownerUserToken && users.length) {
       try {
         step('cleanup_delete_users')
-        await httpJson(
+        const r = await httpJson(
           'POST',
-          `${env.ethoraApiBase}/v1/users/delete-many-with-app-id/${encodeURIComponent(String(newAppId))}`,
+          `${env.ethoraApiBase}/v1/users/delete-many-with-app-id/${encodeURIComponent(String(syntheticApp.appId))}`,
           { Authorization: `Bearer ${ownerUserToken}` },
           { usersIdList: users.map((u) => u.id) }
         )
-      } catch {}
+        if (!r.resp.ok) cleanupErr('delete_users', new Error(`status=${r.resp.status} ${r.text}`))
+      } catch (e) { cleanupErr('delete_users', e) }
     }
-    if (newAppId && ownerUserToken) {
-      try {
-        step('cleanup_delete_app')
-        await httpJson('DELETE', `${env.ethoraApiBase}/v1/apps/${encodeURIComponent(String(newAppId))}`, { Authorization: `Bearer ${ownerUserToken}` })
-      } catch {}
-    }
+    // NOTE: synthetic app intentionally NOT deleted (reused across runs).
   }
 }
 

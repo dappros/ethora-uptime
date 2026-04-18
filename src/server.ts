@@ -149,11 +149,50 @@ async function main() {
     })
   })
 
+  // Heuristic to distinguish a "checker-side error" (e.g. uptime container missing
+  // `WebSocket` polyfill, missing env, network glitch on the probe itself) from a
+  // genuine "monitored service is failing". Checker errors should bubble up as AMBER
+  // (warning) on the wallboard rather than RED, otherwise the dashboard is misleading.
+  function classifyErrorText(errText: string | null | undefined): 'service_fail' | 'checker_error' | 'skipped' {
+    const s = String(errText || '')
+    if (!s) return 'service_fail'
+    if (s.startsWith('skipped:')) return 'skipped'
+    const checkerSignals = [
+      'WebSocket is not defined',
+      'Missing env:',
+      'fetch failed',
+      'getaddrinfo',
+      'ECONNREFUSED',
+      'ENOTFOUND',
+      'EAI_AGAIN',
+      'EHOSTUNREACH',
+      'ETIMEDOUT',
+      'request to ',
+    ]
+    if (checkerSignals.some((sig) => s.includes(sig))) return 'checker_error'
+    return 'service_fail'
+  }
+
+  // Resolve the current configuration from the in-memory map. Treat checks that exist in
+  // the DB but not in the current config as "obsolete" so we can hide them from rollups.
+  function resolveCheckConfig(checkId: string) {
+    const cfg = checkMap.get(checkId)
+    if (!cfg) return { enabled: false, intervalSeconds: null as number | null, isManual: false, obsolete: true }
+    return {
+      enabled: cfg.enabled !== false,
+      intervalSeconds: Number(cfg.intervalSeconds || 0) || null,
+      isManual: cfg.intervalSeconds === 0 || cfg.enabled === false,
+      obsolete: false,
+    }
+  }
+
   app.get('/api/summary', async (_req, res) => {
     const instances = await db.pool.query(
       `select id, name, enabled, tags from instances order by id asc`
     )
-    const out = []
+    const now = Date.now()
+    const out: any[] = []
+    const totals = { instances: 0, enabledInstances: 0, byStatus: { green: 0, amber: 0, red: 0 }, criticalChecks: 0, criticalFailing: 0, optionalChecks: 0, optionalFailing: 0 }
 
     for (const inst of instances.rows) {
       const checks = await db.pool.query(
@@ -164,7 +203,7 @@ async function main() {
         [inst.id]
       )
 
-      const checkOut = []
+      const checkOut: any[] = []
       let hasFail = false
       let hasWarn = false
       let buildInfo: any = null
@@ -173,6 +212,7 @@ async function main() {
         const meta = typeof chk?.meta === 'string' ? (() => { try { return JSON.parse(chk.meta) } catch { return {} } })() : (chk?.meta || {})
         const severity = meta?.severity || 'critical'
         const isOptional = severity === 'optional'
+        const cfg = resolveCheckConfig(chk.id)
         const last = await db.pool.query(
           `select ok, status_code, duration_ms, ts, error_text, details
            from check_runs
@@ -183,40 +223,66 @@ async function main() {
         )
 
         const row = last.rows[0]
-        if (!row) {
-          // No data yet -> warn, but never hard-fail instance
-          if (!isOptional) hasWarn = true
-          checkOut.push({
-            id: chk.id,
-            name: chk.name,
-            type: chk.type,
-            severity,
-            ok: false,
-            statusCode: null,
-            durationMs: null,
-            errorText: 'no data yet',
-          })
-          continue
-        }
-        if (!row.ok) {
-          if (isOptional) {
-            // Optional checks never affect instance status.
-          } else if (typeof row.error_text === 'string' && row.error_text.startsWith('skipped:')) {
-            hasWarn = true
-          } else {
-            hasFail = true
-          }
-        }
-        checkOut.push({
+        const baseOut: any = {
           id: chk.id,
           name: chk.name,
           type: chk.type,
           severity,
+          enabled: cfg.enabled,
+          obsolete: cfg.obsolete,
+          intervalSeconds: cfg.intervalSeconds,
+        }
+        if (!isOptional) totals.criticalChecks += 1
+        else totals.optionalChecks += 1
+
+        if (!row) {
+          // Distinguish "manual / disabled" (never scheduled) from "scheduled but no run yet" (warm-up).
+          const noRunReason = !cfg.enabled ? 'manual_or_disabled' : 'no_data_yet'
+          // Disabled/manual checks should never amber the instance.
+          if (!isOptional && cfg.enabled) hasWarn = true
+          checkOut.push({
+            ...baseOut,
+            ok: false,
+            statusCode: null,
+            durationMs: null,
+            errorText: noRunReason === 'manual_or_disabled' ? null : 'no data yet',
+            errorClass: null,
+            noRunReason,
+            ts: null,
+            lastRunIso: null,
+            lastRunAgoSeconds: null,
+          })
+          continue
+        }
+
+        const errClass = classifyErrorText(row.error_text)
+        if (!row.ok) {
+          if (isOptional) {
+            totals.optionalFailing += 1
+          } else {
+            totals.criticalFailing += 1
+            if (errClass === 'skipped' || errClass === 'checker_error') {
+              hasWarn = true
+            } else {
+              hasFail = true
+            }
+          }
+        }
+
+        const ts = row.ts
+        const lastRunIso = ts ? new Date(ts).toISOString() : null
+        const lastRunAgoSeconds = ts ? Math.max(0, Math.floor((now - new Date(ts).getTime()) / 1000)) : null
+
+        checkOut.push({
+          ...baseOut,
           ok: Boolean(row.ok),
           statusCode: row.status_code ?? null,
           durationMs: row.duration_ms ?? null,
-          ts: row.ts,
+          ts,
+          lastRunIso,
+          lastRunAgoSeconds,
           errorText: row.error_text ?? null,
+          errorClass: row.ok ? null : errClass,
           captures: row.details?.captures || undefined,
         })
 
@@ -227,7 +293,6 @@ async function main() {
             buildInfo = row.details.captures
           } else {
             for (const [k, v] of Object.entries(row.details.captures)) {
-              // Fill only if we don't have it already
               if (buildInfo[k] === undefined || buildInfo[k] === null) {
                 buildInfo[k] = v
               }
@@ -237,6 +302,11 @@ async function main() {
       }
 
       const status = hasFail ? 'red' : hasWarn ? 'amber' : 'green'
+      totals.instances += 1
+      if (inst.enabled) {
+        totals.enabledInstances += 1
+        totals.byStatus[status] += 1
+      }
       out.push({
         id: inst.id,
         name: inst.name,
@@ -248,7 +318,69 @@ async function main() {
       })
     }
 
-    res.json({ instances: out })
+    res.json({
+      generatedAt: new Date().toISOString(),
+      totals,
+      instances: out,
+    })
+  })
+
+  // Sparkline data: bucketed pass/fail counts for a check over a sliding window.
+  app.get('/api/sparkline', async (req, res) => {
+    const checkId = String(req.query.checkId || '').trim()
+    if (!checkId) return res.status(422).json({ error: 'checkId is required' })
+    const sinceMinutes = Math.max(5, Math.min(60 * 24 * 7, Number(req.query.sinceMinutes || 60 * 24)))
+    const buckets = Math.max(6, Math.min(96, Number(req.query.buckets || 24)))
+    const bucketMinutes = Math.max(1, Math.round(sinceMinutes / buckets))
+
+    // Use date_trunc + width_bucket would be more elegant, but we want fixed-width buckets
+    // that always end at "now" so the rightmost bucket is the most-recent slice.
+    const rows = await db.pool.query(
+      `with bounds as (
+         select now() as ts_max,
+                now() - ($1 || ' minutes')::interval as ts_min
+       ),
+       runs as (
+         select ts, ok, duration_ms,
+                floor(extract(epoch from (now() - ts)) / ($2::int * 60)) as bucket_index_from_now
+         from check_runs, bounds
+         where check_id = $3 and ts >= bounds.ts_min
+       )
+       select bucket_index_from_now::int as idx,
+              count(*) as total,
+              count(*) filter (where ok) as ok_count,
+              avg(duration_ms)::int as avg_duration_ms,
+              max(duration_ms) as max_duration_ms,
+              min(ts) as first_ts,
+              max(ts) as last_ts
+       from runs
+       group by bucket_index_from_now
+       order by bucket_index_from_now asc`,
+      [String(sinceMinutes), bucketMinutes, checkId]
+    )
+
+    // Build a dense buckets array from oldest → newest so the UI can render a left→right strip.
+    const dense: Array<any> = []
+    const byIdx = new Map<number, any>()
+    for (const r of rows.rows) byIdx.set(Number(r.idx), r)
+    for (let i = buckets - 1; i >= 0; i--) {
+      const r = byIdx.get(i)
+      dense.push({
+        index: buckets - 1 - i,
+        total: r ? Number(r.total) : 0,
+        okCount: r ? Number(r.ok_count) : 0,
+        failCount: r ? Number(r.total) - Number(r.ok_count) : 0,
+        avgDurationMs: r?.avg_duration_ms ? Number(r.avg_duration_ms) : null,
+        maxDurationMs: r?.max_duration_ms ? Number(r.max_duration_ms) : null,
+      })
+    }
+
+    res.json({
+      checkId,
+      sinceMinutes,
+      bucketMinutes,
+      buckets: dense,
+    })
   })
 
   // Serve UI

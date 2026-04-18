@@ -27,16 +27,38 @@ Open:
 
 ## UI
 
-- `/` shows a wallboard view (per-instance rollup + critical checks)
-- Optional checks are under “Optional checks” (expandable)
-- Journey checks have a **Run** button (manual regression run)
-- Click any check name to open history: `/history.html#<checkId>`
+- `/` shows a wallboard with:
+  - **Top rollup banner**: total green/amber/red instances, critical-OK fraction, optional-OK fraction.
+  - **Tag filter chips**: filter visible cards by `tags` from `uptime.yml` (e.g. `public`, `enterprise`, `staging`).
+  - **Show / Hide disabled instances** toggle (header).
+  - **Theme toggle**: dark / light / wallboard (large-screen). Persisted in `localStorage`.
+  - **Pause / Resume auto-refresh** with a visible 15s countdown.
+- Per-card:
+  - Coloured left border + status pill (GREEN / AMBER / RED).
+  - Build info (version + commit + time) when the API exposes it via captures.
+  - **Promoted Run buttons** for journey/push-validate checks at the top of each card (no need to expand the optional section first).
+  - Critical checks always visible; optional/manual checks under an expander.
+  - Each row shows: status icon, name (link → history), status text (truncated to fit, full message in tooltip), latency, "When" (relative time, hover for absolute), and a 24h **sparkline** (green/red bucketed).
+  - Per-row `▶` (run now) and `⋯` (last-run details) actions.
+  - **Journey "Run" → inline popover** (anchored to the button) for the optional Observer-room field — no full-screen modal until results come back.
+- Click any check name to open history: `/history.html#<checkId>`.
+
+### Status classification
+
+Failures are split into three buckets so the wallboard reflects what an operator actually needs to act on:
+
+- **service_fail** → instance turns RED. Indicates the monitored service is down.
+- **checker_error** → instance turns AMBER. Indicates the uptime container itself failed (DNS, missing polyfill, missing env, refused connection). Don't page on these without first checking the uptime container.
+- **skipped** → instance turns AMBER. Check is intentionally inert (e.g. `Missing env: ETHORA_*`).
+
+The classification is computed server-side in `/api/summary`, so the UI just consumes `errorClass`.
 
 ## API
 
-- `GET /api/summary`: rollup view for UI
-- `GET /api/history?checkId=<id>&sinceMinutes=1440`: time series points from DB
-- `POST /api/run-check` with `{ "checkId": "instanceId:checkId" }`: run a check now and record the result
+- `GET /api/summary`: rollup view for UI. Returns `{ generatedAt, totals: {...}, instances: [...] }`. Each check includes `severity`, `enabled`, `intervalSeconds`, `lastRunIso`, `lastRunAgoSeconds`, `errorClass` (`service_fail | checker_error | skipped`), and `noRunReason` (`manual_or_disabled | no_data_yet`) when there is no run yet.
+- `GET /api/history?checkId=<id>&sinceMinutes=1440`: raw time series points.
+- `GET /api/sparkline?checkId=<id>&sinceMinutes=1440&buckets=24`: bucketed pass/fail counts for the wallboard sparkline strip.
+- `POST /api/run-check` with `{ "checkId": "instanceId:checkId" }`: run a check now and record the result.
 
 ## Local vs Public instances
 
@@ -58,13 +80,36 @@ If you want a check to **not** be scheduled, set:
 
 You can still run it from the UI “Run” button (or via `POST /api/run-check`).
 
+## Synthetic apps (no analytics noise)
+
+Synthetic journeys used to create a fresh app per run (`uptime-journey-<random>`), which made HubSpot/Slack
+report a "new app created" event every time, and cluttered the admin Apps list.
+
+This is now solved with a small contract between the uptime container and the backend:
+
+1. The uptime container always uses **stable, hard-coded display names** for its synthetic apps:
+   - Basic + advanced journeys: `__uptime__journey` (single shared app).
+   - B2B journey: `__uptime__journey_b2b` (single shared child app under the parent tenant).
+2. On each run, the journey **finds the existing app by displayName** (via `GET /v1/apps` or `GET /v2/apps`) and
+   only creates it on first run. Per-run isolation is achieved at the **user/chat level** (suffixed emails / chat UUIDs)
+   inside the same shared app.
+3. Cleanup deletes only the test users and chats created in that run; the synthetic app itself is preserved.
+4. The backend recognises any `displayName` starting with `__uptime__` (or any request carrying
+   `x-ethora-synthetic: 1`) and **skips marketing/CRM side-effects** for it: no HubSpot form submission,
+   no future Slack notifications, no welcome flow.
+
+Net result: one (or two) stable rows in the admin Apps list and zero analytics noise per uptime tick.
+
+If you want to keep the old behaviour, override `ETHORA_APP_NAME_PREFIX` in `uptime.env` to a non-`__uptime__`
+prefix — but you'll lose the analytics suppression too.
+
 ## Journey modes
 
 There are two supported journey levels (configured via `checks[].id`):
 
-- `journey` → basic flow (app + users + 1 chat + add member)
-- `journey_advanced` → comprehensive flow (2 chats, membership changes, XMPP delivery, file upload)
-- `journey_b2b` → tenant/B2B admin flow (create app, app token, users, chat, membership changes, cleanup)
+- `journey` → basic flow (find/create synthetic app + users + 1 chat + add member)
+- `journey_advanced` → comprehensive flow (2 chats, membership changes, XMPP delivery, file upload) — shares the same synthetic app as `journey`
+- `journey_b2b` → tenant/B2B admin flow (find/create child app, app token, users, chat, membership changes, cleanup)
 
 ### Required env for **basic** journey
 
@@ -74,7 +119,7 @@ There are two supported journey levels (configured via `checks[].id`):
 - `ETHORA_ADMIN_PASSWORD`
 
 Optional:
-- `ETHORA_APP_NAME_PREFIX`
+- `ETHORA_APP_NAME_PREFIX` — kept for backwards compatibility but no longer used to mint new app names by default. The journey now uses the hard-coded `__uptime__journey` displayName so the backend can suppress HubSpot/Slack analytics.
 - `ETHORA_USERS_COUNT`
 
 ### Additional env for **advanced** journey
