@@ -113,8 +113,12 @@
       .status-tag.red { color: var(--red); background: rgba(248,81,73,0.15); }
       .status-tag.gray { color: var(--muted); background: rgba(110,118,129,0.15); }
 
-      .card-actions { display: flex; gap: 6px; margin: 10px 0 4px; flex-wrap: wrap; }
-      .card-actions .spacer { flex: 1; }
+      /* Section blocks inside a merged Local + _Public card */
+      .section { margin-top: 10px; }
+      .section + .section { margin-top: 14px; padding-top: 6px; border-top: 1px dashed var(--card-border); }
+      .section-head { display: flex; align-items: center; gap: 8px; padding: 4px 0 2px; }
+      .section-head .section-title { font-weight: 600; font-size: 13px; }
+      .section-head .section-meta { color: var(--muted); font-size: 11px; margin-left: auto; }
 
       table.checks { width: 100%; border-collapse: collapse; margin-top: 6px; }
       table.checks th, table.checks td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--card-border); font-size: 13px; vertical-align: middle; }
@@ -445,42 +449,39 @@
         `;
       }
 
-      function buildCard(inst) {
-        const critical = inst.checks.filter(c => (c.severity || 'critical') === 'critical');
-        const optional = inst.checks.filter(c => (c.severity || 'critical') !== 'critical');
-
-        const buildLine = inst.build
+      function buildLineFor(inst) {
+        return inst.build
           ? [
               inst.build.buildVersion ? `v${inst.build.buildVersion}` : (inst.build.version ? `v${inst.build.version}` : null),
               inst.build.commit ? `commit ${String(inst.build.commit).slice(0, 12)}` : null,
               inst.build.time ? `${inst.build.time}` : null,
             ].filter(Boolean).join(' · ')
           : '';
+      }
 
-        const tagBadges = (inst.tags || []).map(t => `<span class="badge">${escapeHtml(t)}</span>`).join('');
-        const disabledBadge = !inst.enabled ? '<span class="badge" style="border-color: var(--amber); color: var(--amber);">disabled</span>' : '';
-
-        const instStatus = inst.enabled ? statusToClass(inst.status) : 'gray';
-
-        // Find the journey check (if any) for the promoted Run action.
-        const journeyChecks = inst.checks.filter(c => c.type === 'journey');
-        const pushValidate = inst.checks.find(c => c.type === 'push_validate');
-
-        const journeyButtons = journeyChecks.map(c => {
-          const label = c.name.replace(/^Synthetic_journey_?/, '').replace(/_/g, ' ').trim() || 'basic';
-          return `<button class="primary" data-run="${escapeHtml(c.id)}" data-run-kind="journey" data-instance="${escapeHtml(inst.id)}" data-name="${escapeHtml(c.name)}" title="Run synthetic journey: ${escapeHtml(c.name)}">▶ Journey: ${escapeHtml(label)}</button>`;
-        }).join('');
-        const pushButton = pushValidate
-          ? `<button data-run="${escapeHtml(pushValidate.id)}" data-run-kind="push_validate" data-instance="${escapeHtml(inst.id)}" data-name="${escapeHtml(pushValidate.name)}">▶ Push validate</button>`
-          : '';
-
-        const rowActions = (c) => {
+      function makeRowActions(inst) {
+        return (c) => {
           const parts = [];
           if (c.type === 'journey') parts.push(`<button class="ghost" data-run="${escapeHtml(c.id)}" data-run-kind="journey" data-instance="${escapeHtml(inst.id)}" data-name="${escapeHtml(c.name)}" title="Run now">▶</button>`);
           if (c.type === 'push_validate') parts.push(`<button class="ghost" data-run="${escapeHtml(c.id)}" data-run-kind="push_validate" data-instance="${escapeHtml(inst.id)}" data-name="${escapeHtml(c.name)}" title="Run now">▶</button>`);
           parts.push(`<button class="ghost" data-details="${escapeHtml(c.id)}" data-name="${escapeHtml(c.name)}" title="Last-run details">⋯</button>`);
           return `<span class="row-actions">${parts.join('')}</span>`;
         };
+      }
+
+      // Render a single instance into a card. No promoted action row at the top —
+      // the per-row ▶ buttons inside the (always visible) Critical table and the
+      // (collapsible) Optional table are sufficient and use much less header space.
+      function buildCard(inst) {
+        const critical = inst.checks.filter(c => (c.severity || 'critical') === 'critical');
+        const optional = inst.checks.filter(c => (c.severity || 'critical') !== 'critical');
+
+        const buildLine = buildLineFor(inst);
+        const tagBadges = (inst.tags || []).map(t => `<span class="badge">${escapeHtml(t)}</span>`).join('');
+        const disabledBadge = !inst.enabled ? '<span class="badge" style="border-color: var(--amber); color: var(--amber);">disabled</span>' : '';
+        const instStatus = inst.enabled ? statusToClass(inst.status) : 'gray';
+
+        const rowActions = makeRowActions(inst);
 
         const card = document.createElement('div');
         card.className = `card status-${instStatus}` + (inst.enabled ? '' : ' disabled');
@@ -493,7 +494,6 @@
             </div>
             <div class="status-tag ${instStatus}"><span class="dot ${instStatus}"></span>${instStatus.toUpperCase()}</div>
           </div>
-          ${(journeyButtons || pushButton) ? `<div class="card-actions">${journeyButtons}${pushButton}<span class="spacer"></span></div>` : ''}
           ${renderRowsTable(critical, { actions: rowActions })}
           ${optional.length ? `
             <details class="optional-section">
@@ -503,6 +503,110 @@
           ` : ''}
         `;
         return card;
+      }
+
+      // Combined-status helper: max severity of internal vs external.
+      function combineStatus(localSt, publicSt) {
+        if (localSt === 'red' || publicSt === 'red') return 'red';
+        if (localSt === 'amber' || publicSt === 'amber') return 'amber';
+        if (localSt === 'green' || publicSt === 'green') return 'green';
+        return 'gray';
+      }
+
+      // Render a Local + _Public pair as a single card with two clearly-labelled
+      // sections ("Internal" and "External (TLS / DNS / Nginx)"). Operators
+      // care about a single Ethora install as a unit, not as two cards that
+      // happen to share a name prefix. The combined card also makes it
+      // immediately obvious when internal and external diverge (which is the
+      // most actionable signal).
+      function buildPairedCard(localInst, publicInst, displayName) {
+        const localStatus = localInst?.enabled ? statusToClass(localInst.status) : 'gray';
+        const publicStatus = publicInst?.enabled ? statusToClass(publicInst.status) : 'gray';
+        const overall = combineStatus(localStatus, publicStatus);
+
+        // Prefer build info from local (it's more reliable — internal API_ping
+        // captures the X-Build-* fields). Fall back to whichever side has it.
+        const buildLine = buildLineFor(localInst || publicInst) || buildLineFor(publicInst || localInst);
+
+        // Combine tags, dedup.
+        const tagSet = new Set([...(localInst?.tags || []), ...(publicInst?.tags || [])]);
+        const tagBadges = [...tagSet].map(t => `<span class="badge">${escapeHtml(t)}</span>`).join('');
+
+        const enabledBoth = (localInst?.enabled !== false) && (publicInst?.enabled !== false);
+        const disabledBadge = !enabledBoth ? '<span class="badge" style="border-color: var(--amber); color: var(--amber);">disabled</span>' : '';
+
+        // Divergence callout: internal & external disagree on green/red.
+        const diverged =
+          (localStatus === 'red' && publicStatus === 'green') ||
+          (localStatus === 'green' && publicStatus === 'red');
+        const divergeBanner = diverged
+          ? `<div style="margin: 8px 0 4px; padding: 6px 10px; border-radius: 8px; background: rgba(210,153,34,0.12); border: 1px solid var(--amber); color: var(--amber); font-size: 12px;">
+              ⚠ ${localStatus === 'red' ? 'Internal failing' : 'External failing'} — ${publicStatus === 'red' ? 'external also degraded' : 'the other side looks fine'}
+             </div>`
+          : '';
+
+        function sectionFor(inst, headerLabel) {
+          if (!inst) return '';
+          const critical = inst.checks.filter(c => (c.severity || 'critical') === 'critical');
+          const optional = inst.checks.filter(c => (c.severity || 'critical') !== 'critical');
+          const st = inst.enabled ? statusToClass(inst.status) : 'gray';
+          const rowActions = makeRowActions(inst);
+          return `
+            <div class="section">
+              <div class="section-head">
+                <span class="dot ${st}"></span>
+                <span class="section-title">${headerLabel}</span>
+                <span class="section-meta">${escapeHtml(inst.id)}${inst.enabled ? '' : ' · disabled'}</span>
+              </div>
+              ${renderRowsTable(critical, { actions: rowActions })}
+              ${optional.length ? `
+                <details class="optional-section">
+                  <summary>Optional &amp; manual checks (${optional.length})</summary>
+                  ${renderRowsTable(optional, { actions: rowActions })}
+                </details>
+              ` : ''}
+            </div>
+          `;
+        }
+
+        const card = document.createElement('div');
+        card.className = `card status-${overall}` + (enabledBoth ? '' : ' disabled');
+        card.innerHTML = `
+          <div class="card-head">
+            <div>
+              <div class="name">${escapeHtml(displayName)}</div>
+              <div class="meta-line">${escapeHtml(localInst?.id || '?')} + ${escapeHtml(publicInst?.id || '?')}${buildLine ? ` &middot; ${escapeHtml(buildLine)}` : ''}</div>
+              <div class="badges">${tagBadges}${disabledBadge}</div>
+            </div>
+            <div class="status-tag ${overall}"><span class="dot ${overall}"></span>${overall.toUpperCase()}</div>
+          </div>
+          ${divergeBanner}
+          ${sectionFor(localInst, 'Internal (uptime container → host stack)')}
+          ${sectionFor(publicInst, 'External (https → TLS → Nginx)')}
+        `;
+        return card;
+      }
+
+      // Pair instances by name: <X> and <X>_Public become a single card.
+      // Anything that doesn't match the pattern (e.g. a remote third-party
+      // instance) renders as its own card, unchanged.
+      function pairInstances(instances) {
+        const PUBLIC_SUFFIX = '_Public';
+        const result = [];
+        const byBaseName = new Map();
+        for (const inst of instances) {
+          const name = String(inst.name || '');
+          const isPublic = name.endsWith(PUBLIC_SUFFIX);
+          const baseName = isPublic ? name.slice(0, -PUBLIC_SUFFIX.length) : name;
+          let entry = byBaseName.get(baseName);
+          if (!entry) {
+            entry = { displayName: baseName, localInst: null, publicInst: null, order: result.length };
+            byBaseName.set(baseName, entry);
+            result.push(entry);
+          }
+          if (isPublic) entry.publicInst = inst; else entry.localInst = inst;
+        }
+        return result;
       }
 
       // ---------- Run popover ----------
@@ -695,12 +799,20 @@
         renderFilterChips(data);
 
         const visible = (data.instances || []).filter(passesFilters);
+        // Pair Local + _Public into single cards. Singletons render unchanged.
+        const groups = pairInstances(visible);
         grid.innerHTML = '';
-        if (!visible.length) {
+        if (!groups.length) {
           emptyState.style.display = 'block';
         } else {
           emptyState.style.display = 'none';
-          for (const inst of visible) grid.appendChild(buildCard(inst));
+          for (const g of groups) {
+            if (g.localInst && g.publicInst) {
+              grid.appendChild(buildPairedCard(g.localInst, g.publicInst, g.displayName));
+            } else {
+              grid.appendChild(buildCard(g.localInst || g.publicInst));
+            }
+          }
         }
         attachRowHandlers();
         // Lazy-load sparklines
