@@ -120,6 +120,10 @@
       .section-head .section-title { font-weight: 600; font-size: 13px; }
       .section-head .section-meta { color: var(--muted); font-size: 11px; margin-left: auto; }
 
+      /* Promoted journey Run buttons (only the 3 always-on ones: basic / advanced / b2b) */
+      .card-actions { display: flex; gap: 6px; margin: 10px 0 4px; flex-wrap: wrap; }
+      .card-actions .spacer { flex: 1; }
+
       table.checks { width: 100%; border-collapse: collapse; margin-top: 6px; }
       table.checks th, table.checks td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--card-border); font-size: 13px; vertical-align: middle; }
       table.checks th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
@@ -229,7 +233,35 @@
         sparklineCache: new Map(),
         sparklineInflight: new Map(),
         theme: localStorage.getItem('ethoraUptime.theme') || 'dark',
+        // Map<detailKey, boolean> — preserves the open/closed state of each
+        // <details class="optional-section"> across re-renders (auto-refresh
+        // wipes grid.innerHTML so we have to re-apply this on every render).
+        optionalOpen: new Map(),
       };
+
+      // The "always on" core journeys we promote as Run buttons in the card
+      // header. Any other journey (manual / specialised) stays as a per-row
+      // ▶ button inside the Optional & manual checks expander.
+      const PROMOTED_JOURNEY_LOCAL_IDS = new Set(['journey', 'journey_advanced', 'journey_b2b']);
+      function promotedJourneyButtons(inst) {
+        const journeys = (inst.checks || []).filter((c) => {
+          if (c.type !== 'journey') return false;
+          // c.id has the shape "<instanceId>:<localId>" — match on the localId.
+          const localId = String(c.id || '').split(':').pop();
+          return PROMOTED_JOURNEY_LOCAL_IDS.has(String(localId));
+        });
+        if (!journeys.length) return '';
+        // Sort: basic, advanced, b2b (matches the natural escalation).
+        const order = ['journey', 'journey_advanced', 'journey_b2b'];
+        journeys.sort((a, b) => order.indexOf(String(a.id).split(':').pop()) - order.indexOf(String(b.id).split(':').pop()));
+        const buttons = journeys.map((c) => {
+          const localId = String(c.id).split(':').pop();
+          // Friendly label: "basic" / "advanced" / "b2b"
+          const label = localId === 'journey' ? 'basic' : localId.replace(/^journey_/, '');
+          return `<button class="primary" data-run="${escapeHtml(c.id)}" data-run-kind="journey" data-instance="${escapeHtml(inst.id)}" data-name="${escapeHtml(c.name)}" title="Run synthetic journey: ${escapeHtml(c.name)}">▶ Journey: ${escapeHtml(label)}</button>`;
+        });
+        return `<div class="card-actions">${buttons.join('')}<span class="spacer"></span></div>`;
+      }
 
       // ---------- DOM refs ----------
       const grid = document.getElementById('grid');
@@ -469,9 +501,10 @@
         };
       }
 
-      // Render a single instance into a card. No promoted action row at the top —
-      // the per-row ▶ buttons inside the (always visible) Critical table and the
-      // (collapsible) Optional table are sufficient and use much less header space.
+      // Render a single instance into a card. The 3 always-on journeys (basic /
+      // advanced / b2b) get promoted as Run buttons in the card header for
+      // quick access; all other journeys (manual / specialised) stay as per-row
+      // ▶ buttons inside the collapsible Optional & manual checks expander.
       function buildCard(inst) {
         const critical = inst.checks.filter(c => (c.severity || 'critical') === 'critical');
         const optional = inst.checks.filter(c => (c.severity || 'critical') !== 'critical');
@@ -482,6 +515,8 @@
         const instStatus = inst.enabled ? statusToClass(inst.status) : 'gray';
 
         const rowActions = makeRowActions(inst);
+        const detailKey = `optional:${inst.id}`;
+        const isOpen = state.optionalOpen.get(detailKey) === true;
 
         const card = document.createElement('div');
         card.className = `card status-${instStatus}` + (inst.enabled ? '' : ' disabled');
@@ -494,9 +529,10 @@
             </div>
             <div class="status-tag ${instStatus}"><span class="dot ${instStatus}"></span>${instStatus.toUpperCase()}</div>
           </div>
+          ${promotedJourneyButtons(inst)}
           ${renderRowsTable(critical, { actions: rowActions })}
           ${optional.length ? `
-            <details class="optional-section">
+            <details class="optional-section" data-detail-key="${escapeHtml(detailKey)}"${isOpen ? ' open' : ''}>
               <summary>Optional &amp; manual checks (${optional.length})</summary>
               ${renderRowsTable(optional, { actions: rowActions })}
             </details>
@@ -551,6 +587,8 @@
           const optional = inst.checks.filter(c => (c.severity || 'critical') !== 'critical');
           const st = inst.enabled ? statusToClass(inst.status) : 'gray';
           const rowActions = makeRowActions(inst);
+          const detailKey = `optional:${inst.id}`;
+          const isOpen = state.optionalOpen.get(detailKey) === true;
           return `
             <div class="section">
               <div class="section-head">
@@ -560,7 +598,7 @@
               </div>
               ${renderRowsTable(critical, { actions: rowActions })}
               ${optional.length ? `
-                <details class="optional-section">
+                <details class="optional-section" data-detail-key="${escapeHtml(detailKey)}"${isOpen ? ' open' : ''}>
                   <summary>Optional &amp; manual checks (${optional.length})</summary>
                   ${renderRowsTable(optional, { actions: rowActions })}
                 </details>
@@ -568,6 +606,11 @@
             </div>
           `;
         }
+
+        // Promoted journey buttons at card level (they hit host.docker.internal,
+        // so they belong logically with the local side; surfacing them at the
+        // card top makes them obvious and avoids duplicating buttons per section).
+        const promotedButtons = localInst ? promotedJourneyButtons(localInst) : '';
 
         const card = document.createElement('div');
         card.className = `card status-${overall}` + (enabledBoth ? '' : ' disabled');
@@ -580,6 +623,7 @@
             </div>
             <div class="status-tag ${overall}"><span class="dot ${overall}"></span>${overall.toUpperCase()}</div>
           </div>
+          ${promotedButtons}
           ${divergeBanner}
           ${sectionFor(localInst, 'Internal (uptime container → host stack)')}
           ${sectionFor(publicInst, 'External (https → TLS → Nginx)')}
@@ -815,6 +859,17 @@
           }
         }
         attachRowHandlers();
+        // Persist optional-section open/closed state across auto-refreshes.
+        // The DOM is wiped on every render() (grid.innerHTML = ''), so without
+        // this the user's chosen "expanded" state would silently collapse on
+        // the next 15s tick.
+        for (const det of grid.querySelectorAll('details.optional-section[data-detail-key]')) {
+          const key = det.getAttribute('data-detail-key');
+          if (!key) continue;
+          det.addEventListener('toggle', () => {
+            state.optionalOpen.set(key, det.open);
+          });
+        }
         // Lazy-load sparklines
         for (const host of grid.querySelectorAll('.spark-host')) {
           const tr = host.closest('tr');
