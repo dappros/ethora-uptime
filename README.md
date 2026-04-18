@@ -113,11 +113,67 @@ to a non-`__uptime__` prefix — but you'll lose the analytics suppression too.
 
 ## Journey modes
 
-There are three supported journey levels (configured via `checks[].id`):
+There are three supported journey levels (configured via `checks[].id`).
+Each one uses its own distinct stable displayName so they can run concurrently.
 
-- `journey` → basic flow (orphan-sweep + create synthetic app + users + 1 chat + add member + delete chat/users/app)
-- `journey_advanced` → comprehensive flow (2 chats, membership changes, XMPP delivery, file upload) — uses its own distinct synthetic app so it can run concurrently with `journey`
-- `journey_b2b` → tenant/B2B admin flow (orphan-sweep + create child app, app token, users, chat, membership changes, full cleanup)
+### `journey` (basic)
+
+Covers the core admin/end-user flow:
+
+- `GET /v1/apps/get-config` — base app config + appToken resolution
+- `POST /v1/users/login-with-email` — admin login
+- `GET /v1/users/me` — verify admin user JWT works
+- `GET /v1/apps` — orphan sweep (find any leftover synthetic apps)
+- `POST /v1/apps` — create the synthetic app
+- `PUT /v1/apps/{id}` — exercise app-settings update
+- `POST /v2/users/sign-up-with-email/` — sign up N test users
+- `POST /v2/users/login-with-email` — log in test users
+- `POST /v1/chats` — create a chat
+- `POST /v1/chats/users-access` — add a member
+- `DELETE /v1/chats` — delete the chat (cleanup)
+- `POST /v1/users/delete-many-with-app-id/{id}` — delete users (cleanup)
+- `DELETE /v1/apps/{id}` — delete the synthetic app (cleanup)
+
+### `journey_advanced`
+
+Same as basic, plus:
+
+- 2 chats (Test + Validation)
+- Membership add/remove + post-removal join-denied check
+- XMPP WebSocket join + groupchat delivery confirmation
+- File upload via `POST /v1/chats/media/{chatName}` + media stanza delivery + public file access
+- Optional sharelink lifecycle: `POST /v2/files/` → `POST /v1/sharelink` → `GET /v1/sharelink/` → `DELETE /v1/sharelink/{token}` → `DELETE /v2/files/{id}`
+  (skipped gracefully if the install does not have the v2 files / sharelink modules enabled)
+
+### `journey_b2b` (tenant / B2B admin)
+
+Signs a server token locally with the parent tenant's secret and exercises the
+tenant-actor API surface:
+
+- `GET /v2/apps` — orphan sweep
+- `POST /v2/apps` — create child app
+- `GET /v2/apps/{appId}` — fetch app
+- `PATCH /v2/apps/{appId}` — update app settings
+- `POST /v2/apps/{appId}/provision` — provision default rooms
+- `GET /v2/apps/{appId}/bot` + `PUT /v2/apps/{appId}/bot` — AI bot read/update (optional; skipped if AI service is unavailable)
+- `POST /v2/apps/{appId}/tokens` + `GET /v2/apps/{appId}/tokens` + `POST /v2/apps/{appId}/tokens/{tokenId}/rotate` + `DELETE /v2/apps/{appId}/tokens/{tokenId}` — full app-token lifecycle
+- `POST /v2/apps/{appId}/users/batch` + `GET /v2/apps/{appId}/users/batch/{jobId}` + `DELETE /v2/apps/{appId}/users/batch` — async user batch
+- `POST /v2/apps/{appId}/chats` + `PATCH /v2/apps/{appId}/chats/{chatId}` + `DELETE /v2/apps/{appId}/chats` — chat lifecycle
+- `POST /v2/apps/{appId}/chats/users-access` + `DELETE /v2/apps/{appId}/chats/users-access` — chat membership
+- `GET /v2/apps/{appId}/users/{userId}/chats` — user chat list
+- `POST /v2/apps/{appId}/chats/broadcast` + `GET /v2/apps/{appId}/chats/broadcast/{jobId}` — async broadcast (skipped gracefully if 5xx)
+- `DELETE /v2/apps/{appId}` — delete the child app (cleanup)
+
+### Roadmap (not yet implemented)
+
+If you want even more coverage, candidate journeys to add:
+
+- `journey_password_reset` — `POST /v1/users/forgot` + `POST /v1/users/reset` (without email roundtrip; just confirms endpoints respond)
+- `journey_token_refresh` — `POST /v1/users/login/refresh`
+- `journey_signup_validation` — `POST /v1/apps/check-domain-name` + `GET /v1/users/checkEmail/{email}`
+- `journey_user_tags` — `POST /v1/users/tags-add/{appId}` + `tags-set` + `tags-delete`
+- `journey_chat_reports` — `POST /v1/chats/reports/{chatName}` (moderation flow)
+- `journey_app_stats` — `GET /v1/apps/graph-statistic/{appId}`
 
 ### Required env for **basic** journey
 

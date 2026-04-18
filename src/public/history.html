@@ -5,59 +5,324 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Ethora Uptime - History</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%232ecc71'/%3E%3C/svg%3E" />
     <style>
-      :root { color-scheme: light dark; }
-      body { font-family: ui-sans-serif, system-ui, Arial; margin: 0; padding: 16px; }
-      .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-      .muted { opacity: 0.7; font-size: 12px; }
-      canvas { width: 100%; height: 240px; border: 1px solid rgba(127,127,127,0.35); border-radius: 10px; }
-      select, button { padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(127,127,127,0.35); background: transparent; }
-      a { color: inherit; }
+      :root {
+        --bg: #0f1115;
+        --card: #161a21;
+        --card-border: #262b35;
+        --text: #e6edf3;
+        --muted: #8b95a6;
+        --link: #79c0ff;
+        --green: #2ea043;
+        --amber: #d29922;
+        --red: #f85149;
+        --gray: #6e7681;
+        --accent: #58a6ff;
+        --accent-bg: rgba(88,166,255,0.1);
+        --shadow: 0 4px 14px rgba(0,0,0,0.35);
+        --grid: rgba(127,127,127,0.18);
+        color-scheme: dark;
+      }
+      [data-theme="light"] {
+        --bg: #f6f8fa;
+        --card: #ffffff;
+        --card-border: #d0d7de;
+        --text: #1f2328;
+        --muted: #59636e;
+        --link: #0969da;
+        --green: #1a7f37;
+        --amber: #9a6700;
+        --red: #cf222e;
+        --gray: #57606a;
+        --accent: #0969da;
+        --accent-bg: rgba(9,105,218,0.08);
+        --shadow: 0 1px 4px rgba(0,0,0,0.08);
+        --grid: rgba(127,127,127,0.18);
+        color-scheme: light;
+      }
+      [data-theme="wallboard"] {
+        --bg: #000000;
+        --card: #0a0d12;
+        --card-border: #1a1f29;
+        --text: #ffffff;
+        --muted: #9aa6ba;
+        --green: #2ea043;
+        --amber: #f0b429;
+        --red: #ff4d4f;
+        color-scheme: dark;
+      }
+
+      * { box-sizing: border-box; }
+      html, body { margin: 0; background: var(--bg); color: var(--text); font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial; }
+      body { padding: 16px; }
+      a { color: var(--link); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+      button { font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--card-border); border-radius: 8px; padding: 7px 12px; cursor: pointer; transition: background 0.15s; }
+      button:hover:not(:disabled) { background: var(--accent-bg); border-color: var(--accent); }
+      button:disabled { opacity: 0.6; cursor: not-allowed; }
+      button.ghost { background: transparent; border-color: transparent; padding: 4px 8px; color: var(--muted); }
+      button.ghost:hover:not(:disabled) { color: var(--text); background: var(--accent-bg); border-color: transparent; }
+      button.active { background: var(--accent-bg); border-color: var(--accent); color: var(--text); }
+      select { font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--card-border); border-radius: 8px; padding: 6px 10px; }
+
+      header.app { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 14px; }
+      .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+      .brand-mark { width: 28px; height: 28px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px var(--accent-bg); flex-shrink: 0; }
+      .brand-title { font-size: 16px; font-weight: 700; }
+      .brand-sub { font-size: 12px; color: var(--muted); word-break: break-all; }
+      .header-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+      .header-actions .sep { width: 1px; align-self: stretch; background: var(--card-border); }
+
+      .meta-card { background: var(--card); border: 1px solid var(--card-border); border-radius: 12px; padding: 14px 16px; box-shadow: var(--shadow); margin-bottom: 14px; }
+      .meta-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+      .meta-row .info { display: flex; flex-direction: column; gap: 2px; }
+      .meta-row .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+      .meta-row .value { font-weight: 600; font-size: 14px; word-break: break-all; }
+      .meta-row .spacer { flex: 1; }
+      .badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--card-border); font-size: 11px; color: var(--muted); }
+      .badge.green { color: var(--green); border-color: var(--green); }
+      .badge.amber { color: var(--amber); border-color: var(--amber); }
+      .badge.red { color: var(--red); border-color: var(--red); }
+      .window-pills { display: inline-flex; gap: 4px; }
+      .window-pills button { padding: 4px 10px; font-size: 12px; }
+
+      .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 14px; }
+      .stat { background: var(--card); border: 1px solid var(--card-border); border-radius: 12px; padding: 12px 14px; box-shadow: var(--shadow); }
+      .stat .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+      .stat .value { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 2px; }
+      .stat .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+      .stat.ok .value { color: var(--green); }
+      .stat.fail .value { color: var(--red); }
+      .stat.warn .value { color: var(--amber); }
+
+      .panel { background: var(--card); border: 1px solid var(--card-border); border-radius: 12px; padding: 14px 16px; box-shadow: var(--shadow); margin-bottom: 14px; }
+      .panel h3 { margin: 0 0 8px; font-size: 13px; color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
+      .panel .legend { color: var(--muted); font-size: 11px; margin-top: 6px; }
+
+      canvas#chart { display: block; width: 100%; height: 260px; max-width: 100%; }
+      .timeline-strip { display: block; width: 100%; height: 18px; margin-top: 8px; border-radius: 4px; overflow: hidden; }
+
+      .tooltip { position: fixed; display: none; pointer-events: none; padding: 8px 10px; border: 1px solid var(--accent); border-radius: 8px; background: var(--card); color: var(--text); max-width: 360px; z-index: 9999; box-shadow: var(--shadow); font-size: 12px; }
+      .tooltip .when { color: var(--muted); font-size: 11px; margin-top: 2px; }
+      .tooltip .err { color: var(--red); margin-top: 4px; word-break: break-word; }
+
+      table.failures { width: 100%; border-collapse: collapse; }
+      table.failures th, table.failures td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--card-border); font-size: 13px; vertical-align: top; }
+      table.failures th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+      table.failures tr:last-child td { border-bottom: none; }
+      table.failures td.when { color: var(--muted); font-size: 12px; white-space: nowrap; }
+      table.failures td.err { color: var(--red); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; word-break: break-word; }
+      table.failures td.code { font-variant-numeric: tabular-nums; color: var(--muted); }
+
+      .empty { padding: 28px 16px; text-align: center; color: var(--muted); }
     </style>
   </head>
   <body>
-    <div class="row">
-      <div style="font-size:18px;font-weight:700;">History</div>
-      <div class="muted">CheckId: <span id="checkId"></span></div>
-      <div style="flex:1;"></div>
-      <label class="muted">Window</label>
-      <select id="windowSel">
-        <option value="60">1h</option>
-        <option value="360">6h</option>
-        <option value="1440" selected>24h</option>
-        <option value="10080">7d</option>
-      </select>
-      <button id="backBtn">Back</button>
-    </div>
+    <header class="app">
+      <div class="brand">
+        <span class="brand-mark" id="brandMark"></span>
+        <div style="min-width: 0;">
+          <div class="brand-title" id="checkTitle">Check history</div>
+          <div class="brand-sub" id="checkIdLabel">—</div>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button class="ghost" id="themeBtn" title="Toggle theme">Theme</button>
+        <span class="sep"></span>
+        <button class="ghost" id="autoRefreshBtn" title="Auto-refresh every 30s">Auto-refresh</button>
+        <button id="refreshBtn">Refresh now</button>
+        <button id="backBtn">← Back to wallboard</button>
+      </div>
+    </header>
 
-    <p class="muted">Green = OK, Red = FAIL. Line shows response time (ms). Gaps mean no data.</p>
-    <canvas id="chart" width="1200" height="260"></canvas>
-    <div id="tooltip" class="muted" style="position:fixed;display:none;pointer-events:none;padding:6px 8px;border:1px solid rgba(127,127,127,0.35);border-radius:8px;background:rgba(0,0,0,0.65);color:#fff;max-width:360px;z-index:9999;"></div>
-    <pre id="stats" class="muted"></pre>
+    <section class="meta-card">
+      <div class="meta-row">
+        <div class="info"><span class="label">Window</span>
+          <div class="window-pills">
+            <button data-mins="60">1h</button>
+            <button data-mins="360">6h</button>
+            <button data-mins="1440" class="active">24h</button>
+            <button data-mins="10080">7d</button>
+          </div>
+        </div>
+        <div class="info"><span class="label">Type</span><span class="value" id="metaType">—</span></div>
+        <div class="info"><span class="label">Severity</span><span class="value" id="metaSeverity">—</span></div>
+        <div class="info"><span class="label">Schedule</span><span class="value" id="metaSchedule">—</span></div>
+        <div class="info"><span class="label">Last run</span><span class="value" id="metaLastRun">—</span></div>
+        <div class="spacer"></div>
+        <div id="lastStatus"></div>
+      </div>
+    </section>
+
+    <section class="stats-grid" id="statsGrid"></section>
+
+    <section class="panel">
+      <h3>Latency &amp; status</h3>
+      <canvas id="chart"></canvas>
+      <div id="timelineStrip" class="timeline-strip" aria-label="status timeline"></div>
+      <div class="legend">Green dot = OK, red dot = FAIL. Y-axis is response time (ms). Hover for details. The strip below shows uptime per bucket.</div>
+    </section>
+
+    <section class="panel">
+      <h3>Recent failures (last 20)</h3>
+      <div id="failuresContainer"></div>
+    </section>
+
+    <div class="tooltip" id="tooltip"></div>
 
     <script>
-      const checkIdEl = document.getElementById('checkId');
+      // ---------- State ----------
+      const state = {
+        sinceMinutes: 1440,
+        autoRefresh: false,
+        autoRefreshTimer: null,
+        autoRefreshMs: 30000,
+        theme: localStorage.getItem('ethoraUptime.theme') || 'dark',
+        checkId: '',
+        checkMeta: null,
+        points: [],
+        lastStatus: null,
+      };
+
+      // ---------- DOM ----------
+      const checkTitle = document.getElementById('checkTitle');
+      const checkIdLabel = document.getElementById('checkIdLabel');
+      const themeBtn = document.getElementById('themeBtn');
+      const autoRefreshBtn = document.getElementById('autoRefreshBtn');
+      const refreshBtn = document.getElementById('refreshBtn');
+      const backBtn = document.getElementById('backBtn');
+      const brandMark = document.getElementById('brandMark');
+      const metaType = document.getElementById('metaType');
+      const metaSeverity = document.getElementById('metaSeverity');
+      const metaSchedule = document.getElementById('metaSchedule');
+      const metaLastRun = document.getElementById('metaLastRun');
+      const lastStatusEl = document.getElementById('lastStatus');
+      const statsGrid = document.getElementById('statsGrid');
+      const failuresContainer = document.getElementById('failuresContainer');
       const canvas = document.getElementById('chart');
-      const ctx = canvas.getContext('2d');
+      const timelineStrip = document.getElementById('timelineStrip');
       const tooltip = document.getElementById('tooltip');
-      const statsEl = document.getElementById('stats');
-      const windowSel = document.getElementById('windowSel');
-      document.getElementById('backBtn').addEventListener('click', () => history.back());
+      const ctx = canvas.getContext('2d');
 
-      function getCheckId() {
-        return decodeURIComponent((location.hash || '').replace(/^#/, ''));
+      // ---------- Helpers ----------
+      function applyTheme() {
+        document.body.setAttribute('data-theme', state.theme);
+        themeBtn.textContent = state.theme === 'wallboard' ? 'Wallboard' : (state.theme === 'light' ? 'Light' : 'Dark');
+      }
+      applyTheme();
+
+      function escapeHtml(s) {
+        return String(s ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+      }
+      function fmtAbsolute(ts) { try { return new Date(ts).toLocaleString(); } catch { return String(ts || ''); } }
+      function fmtRelative(seconds) {
+        if (seconds == null || seconds < 0) return '';
+        if (seconds < 5) return 'just now';
+        if (seconds < 60) return `${Math.floor(seconds)}s ago`;
+        if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+        if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+        return `${Math.floor(seconds / 86400)}d ago`;
+      }
+      function getCssVar(name) {
+        return getComputedStyle(document.body).getPropertyValue(name).trim() || '#888';
+      }
+      function getCheckIdFromHash() { return decodeURIComponent((location.hash || '').replace(/^#/, '')); }
+      function pct(num, den) { return den === 0 ? '—' : `${Math.round((num / den) * 1000) / 10}%`; }
+      function quantile(sorted, q) { if (!sorted.length) return 0; const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor(sorted.length * q))); return sorted[idx]; }
+      function getDpr() { return Math.max(1, window.devicePixelRatio || 1); }
+
+      // ---------- Resize / DPR-aware canvas ----------
+      function resizeCanvas() {
+        const dpr = getDpr();
+        const cssW = canvas.clientWidth;
+        const cssH = canvas.clientHeight;
+        if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
+          canvas.width = Math.round(cssW * dpr);
+          canvas.height = Math.round(cssH * dpr);
+        }
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       }
 
-      function clear() {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      // ---------- Meta + last-run loader ----------
+      async function loadMeta() {
+        try {
+          const r = await fetch('/api/summary');
+          const data = await r.json();
+          for (const inst of data.instances || []) {
+            for (const c of inst.checks || []) {
+              if (c.id === state.checkId) {
+                state.checkMeta = { ...c, instanceName: inst.name, instanceId: inst.id };
+                state.lastStatus = c;
+                renderMeta();
+                return;
+              }
+            }
+          }
+        } catch {}
       }
 
+      function renderMeta() {
+        const m = state.checkMeta || {};
+        checkTitle.textContent = m.name ? `${m.name}` : 'Check history';
+        checkIdLabel.textContent = `${m.instanceName || ''} · ${state.checkId}`;
+        metaType.textContent = m.type || '—';
+        metaSeverity.textContent = m.severity || '—';
+        metaSchedule.textContent = m.intervalSeconds ? `every ${m.intervalSeconds}s` : (m.enabled === false ? 'manual / disabled' : '—');
+        const ago = m.lastRunAgoSeconds;
+        metaLastRun.textContent = ago != null ? `${fmtRelative(ago)} (${fmtAbsolute(m.lastRunIso)})` : (m.errorText || 'no data');
+
+        // last status pill
+        let cls = 'gray', label = 'NO DATA';
+        if (m.noRunReason === 'manual_or_disabled') { cls = 'gray'; label = 'MANUAL'; }
+        else if (m.ok) { cls = 'green'; label = 'OK'; }
+        else if (m.errorClass === 'checker_error' || m.errorClass === 'skipped' || m.noRunReason === 'no_data_yet') { cls = 'amber'; label = 'WARN'; }
+        else if (m.ok === false) { cls = 'red'; label = 'FAIL'; }
+        lastStatusEl.innerHTML = `<span class="badge ${cls}">●&nbsp;${label}</span>`;
+        brandMark.style.background = `var(--${cls})`;
+      }
+
+      // ---------- Stats ----------
+      function renderStats(points) {
+        const n = points.length;
+        const ok = points.filter(p => p.ok).length;
+        const fail = n - ok;
+        const ms = points.map(p => p.duration_ms || 0);
+        const sortedMs = [...ms].sort((a,b) => a - b);
+        const p50 = quantile(sortedMs, 0.5);
+        const p95 = quantile(sortedMs, 0.95);
+        const p99 = quantile(sortedMs, 0.99);
+        const max = sortedMs.length ? sortedMs[sortedMs.length - 1] : 0;
+        const avg = ms.length ? Math.round(ms.reduce((a,b) => a + b, 0) / ms.length) : 0;
+        // Compute uptime% (only over scheduled runs we observed)
+        const uptimePct = n === 0 ? '—' : pct(ok, n);
+
+        statsGrid.innerHTML = `
+          <div class="stat ok"><div class="label">Uptime (window)</div><div class="value">${uptimePct}</div><div class="sub">${ok} OK / ${n} runs</div></div>
+          <div class="stat ${fail ? 'fail' : ''}"><div class="label">Failures</div><div class="value">${fail}</div><div class="sub">${pct(fail, n)} of runs</div></div>
+          <div class="stat"><div class="label">Median (p50)</div><div class="value">${p50}<span class="sub" style="font-size:13px;"> ms</span></div></div>
+          <div class="stat ${p95 > 1000 ? 'warn' : ''}"><div class="label">p95</div><div class="value">${p95}<span class="sub" style="font-size:13px;"> ms</span></div></div>
+          <div class="stat ${p99 > 2000 ? 'warn' : ''}"><div class="label">p99</div><div class="value">${p99}<span class="sub" style="font-size:13px;"> ms</span></div></div>
+          <div class="stat"><div class="label">Max</div><div class="value">${max}<span class="sub" style="font-size:13px;"> ms</span></div><div class="sub">avg ${avg} ms</div></div>
+        `;
+      }
+
+      // ---------- Chart ----------
       let lastDrawState = null; // { points, xOf, yOf, padL, padT, w, h, minX, maxX, maxY }
+      function drawChart(points) {
+        resizeCanvas();
+        const cssW = canvas.clientWidth;
+        const cssH = canvas.clientHeight;
+        ctx.clearRect(0, 0, cssW, cssH);
 
-      function draw(points) {
-        clear();
         if (!points.length) {
-          ctx.fillText('No data', 20, 40);
+          ctx.fillStyle = getCssVar('--muted');
+          ctx.font = '14px ui-sans-serif, system-ui';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('No data in this window', cssW / 2, cssH / 2);
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'alphabetic';
           lastDrawState = null;
           return;
         }
@@ -66,53 +331,79 @@
         const ys = points.map(p => p.duration_ms || 0);
         const minX = Math.min(...xs);
         const maxX = Math.max(...xs);
-        const maxY = Math.max(10, ...ys);
+        const maxY = Math.max(50, ...ys) * 1.1;
 
-        const padL = 40, padR = 10, padT = 10, padB = 20;
-        const w = canvas.width - padL - padR;
-        const h = canvas.height - padT - padB;
-
+        const padL = 50, padR = 14, padT = 12, padB = 26;
+        const w = cssW - padL - padR;
+        const h = cssH - padT - padB;
         const xOf = (t) => padL + (w * (t - minX) / (maxX - minX || 1));
         const yOf = (v) => padT + (h - (h * v / maxY));
 
+        // gridlines
+        const gridColor = getCssVar('--grid');
+        ctx.strokeStyle = gridColor;
+        ctx.lineWidth = 1;
+        ctx.font = '11px ui-sans-serif, system-ui';
+        ctx.fillStyle = getCssVar('--muted');
+        const yTicks = 4;
+        for (let i = 0; i <= yTicks; i++) {
+          const v = Math.round((maxY * (yTicks - i)) / yTicks);
+          const y = padT + (h * i / yTicks);
+          ctx.beginPath();
+          ctx.moveTo(padL, y);
+          ctx.lineTo(padL + w, y);
+          ctx.stroke();
+          ctx.fillText(`${v}`, 6, y + 3);
+        }
+
         // axes
-        ctx.strokeStyle = 'rgba(127,127,127,0.5)';
+        ctx.strokeStyle = getCssVar('--card-border');
         ctx.beginPath();
         ctx.moveTo(padL, padT);
         ctx.lineTo(padL, padT + h);
         ctx.lineTo(padL + w, padT + h);
         ctx.stroke();
 
-        // line
-        ctx.strokeStyle = 'rgba(52,152,219,0.9)';
+        // Mark fail bands as a translucent vertical stripe
+        const failColor = getCssVar('--red') + '20';
+        ctx.fillStyle = failColor;
+        for (const p of points) {
+          if (p.ok) continue;
+          const x = xOf(new Date(p.ts).getTime());
+          ctx.fillRect(x - 1, padT, 2, h);
+        }
+
+        // line (only across consecutive OK runs; break on FAIL to avoid misleading interpolation)
+        ctx.strokeStyle = getCssVar('--accent');
+        ctx.lineWidth = 1.5;
         ctx.beginPath();
-        points.forEach((p, i) => {
+        let last = null;
+        for (const p of points) {
           const x = xOf(new Date(p.ts).getTime());
           const y = yOf(p.duration_ms || 0);
-          if (i === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
-        });
+          if (!p.ok) { last = null; continue; }
+          if (last == null) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          last = { x, y };
+        }
         ctx.stroke();
 
         // markers
-        points.forEach((p) => {
+        for (const p of points) {
           const x = xOf(new Date(p.ts).getTime());
           const y = yOf(p.duration_ms || 0);
-          ctx.fillStyle = p.ok ? 'rgba(46,204,113,0.9)' : 'rgba(231,76,60,0.9)';
+          ctx.fillStyle = p.ok ? getCssVar('--green') : getCssVar('--red');
           ctx.beginPath();
-          ctx.arc(x, y, 3, 0, Math.PI * 2);
+          ctx.arc(x, y, p.ok ? 2.6 : 3.4, 0, Math.PI * 2);
           ctx.fill();
-        });
+        }
 
-        // labels
-        ctx.fillStyle = 'rgba(127,127,127,0.9)';
-        ctx.fillText('ms', 6, 12);
-        ctx.fillText(String(maxY), 6, padT + 10);
-        ctx.fillText('0', 12, padT + h);
-
-        // x-axis time labels (start/end)
+        // x labels (start, mid, end)
+        ctx.fillStyle = getCssVar('--muted');
         const fmt = (t) => new Date(t).toLocaleString();
         ctx.fillText(fmt(minX), padL, padT + h + 16);
+        const midLabel = fmt((minX + maxX) / 2);
+        const midW = ctx.measureText(midLabel).width;
+        ctx.fillText(midLabel, padL + (w - midW) / 2, padT + h + 16);
         const endLabel = fmt(maxX);
         const endW = ctx.measureText(endLabel).width;
         ctx.fillText(endLabel, padL + w - endW, padT + h + 16);
@@ -120,21 +411,42 @@
         lastDrawState = { points, xOf, yOf, padL, padT, w, h, minX, maxX, maxY };
       }
 
-      function hideTooltip() {
-        tooltip.style.display = 'none';
+      function drawTimelineStrip(points) {
+        // Build a horizontal status strip — bucket the window into ~80 segments,
+        // colour each by the worst result observed in that bucket.
+        const buckets = 80;
+        const segments = Array.from({ length: buckets }, () => ({ ok: 0, fail: 0 }));
+        if (!points.length) {
+          timelineStrip.innerHTML = '';
+          return;
+        }
+        const xs = points.map(p => new Date(p.ts).getTime());
+        const minX = Math.min(...xs);
+        const maxX = Math.max(...xs);
+        const span = Math.max(1, maxX - minX);
+        for (const p of points) {
+          const idx = Math.min(buckets - 1, Math.max(0, Math.floor(((new Date(p.ts).getTime() - minX) / span) * buckets)));
+          if (p.ok) segments[idx].ok += 1; else segments[idx].fail += 1;
+        }
+        const parts = [`<svg viewBox="0 0 ${buckets} 18" preserveAspectRatio="none" style="width:100%;height:18px;">`];
+        for (let i = 0; i < buckets; i++) {
+          const s = segments[i];
+          const total = s.ok + s.fail;
+          let fill;
+          if (total === 0) fill = 'var(--card-border)';
+          else if (s.fail === 0) fill = 'var(--green)';
+          else if (s.ok === 0) fill = 'var(--red)';
+          else fill = 'var(--amber)';
+          parts.push(`<rect x="${i}" y="0" width="1" height="18" fill="${fill}"/>`);
+        }
+        parts.push('</svg>');
+        timelineStrip.innerHTML = parts.join('');
       }
 
-      function showTooltip(x, y, html) {
-        tooltip.innerHTML = html;
-        tooltip.style.left = (x + 12) + 'px';
-        tooltip.style.top = (y + 12) + 'px';
-        tooltip.style.display = 'block';
-      }
-
+      // ---------- Tooltip ----------
       function nearestPoint(points, xPx, xOf) {
         if (!points.length) return null;
-        let best = null;
-        let bestDist = Infinity;
+        let best = null, bestDist = Infinity;
         for (const p of points) {
           const x = xOf(new Date(p.ts).getTime());
           const d = Math.abs(x - xPx);
@@ -143,49 +455,105 @@
         return { p: best, dist: bestDist };
       }
 
-      canvas.addEventListener('mouseleave', () => hideTooltip());
+      canvas.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
       canvas.addEventListener('mousemove', (e) => {
         if (!lastDrawState) return;
         const rect = canvas.getBoundingClientRect();
-        const x = (e.clientX - rect.left) * (canvas.width / rect.width);
-        const y = (e.clientY - rect.top) * (canvas.height / rect.height);
-
+        const x = e.clientX - rect.left;
         const { points, xOf } = lastDrawState;
         const np = nearestPoint(points, x, xOf);
-        if (!np || !np.p) return hideTooltip();
-        if (np.dist > 10) return hideTooltip();
-
+        if (!np?.p || np.dist > 14) { tooltip.style.display = 'none'; return; }
         const p = np.p;
-        const ts = new Date(p.ts).toLocaleString();
-        const ms = p.duration_ms ?? '';
-        const status = p.ok ? 'OK' : 'FAIL';
-        showTooltip(e.clientX, e.clientY, `<div><b>${status}</b> · ${ms} ms</div><div>${ts}</div>`);
+        const status = p.ok ? '<span style="color: var(--green);">● OK</span>' : '<span style="color: var(--red);">● FAIL</span>';
+        const err = p.ok || !p.error_text ? '' : `<div class="err">${escapeHtml(String(p.error_text).slice(0, 200))}</div>`;
+        tooltip.innerHTML = `
+          <div><b>${status}</b> &middot; ${p.duration_ms ?? '—'} ms${p.status_code ? ` &middot; HTTP ${p.status_code}` : ''}</div>
+          <div class="when">${escapeHtml(fmtAbsolute(p.ts))}</div>
+          ${err}
+        `;
+        tooltip.style.left = (e.clientX + 14) + 'px';
+        tooltip.style.top = (e.clientY + 14) + 'px';
+        tooltip.style.display = 'block';
       });
 
-      async function load() {
-        const checkId = getCheckId();
-        checkIdEl.textContent = checkId || '(none)';
-        const sinceMinutes = Number(windowSel.value || 1440);
-        if (!checkId) return;
-        const r = await fetch(`/api/history?checkId=${encodeURIComponent(checkId)}&sinceMinutes=${sinceMinutes}`);
-        const data = await r.json();
-        const pts = data.points || [];
-        draw(pts);
-
-        const okCount = pts.filter(p => p.ok).length;
-        const failCount = pts.length - okCount;
-        const p95 = (() => {
-          const arr = pts.map(p => p.duration_ms || 0).sort((a,b)=>a-b);
-          if (!arr.length) return 0;
-          return arr[Math.floor(arr.length * 0.95)];
-        })();
-        statsEl.textContent = `points=${pts.length} ok=${okCount} fail=${failCount} p95_ms=${p95}`;
+      // ---------- Recent failures ----------
+      function renderFailures(points) {
+        const failures = points.filter(p => !p.ok).slice(-20).reverse();
+        if (!failures.length) {
+          failuresContainer.innerHTML = '<div class="empty">No failures in this window — all green.</div>';
+          return;
+        }
+        failuresContainer.innerHTML = `
+          <table class="failures">
+            <thead><tr><th>When</th><th>HTTP</th><th>Latency</th><th>Error</th></tr></thead>
+            <tbody>
+              ${failures.map(f => `
+                <tr>
+                  <td class="when" title="${escapeHtml(fmtAbsolute(f.ts))}">${escapeHtml(fmtAbsolute(f.ts))}</td>
+                  <td class="code">${f.status_code ?? '—'}</td>
+                  <td class="code">${f.duration_ms != null ? f.duration_ms + ' ms' : '—'}</td>
+                  <td class="err">${escapeHtml(f.error_text || '(no error message)')}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `;
       }
 
-      windowSel.addEventListener('change', () => load().catch(console.error));
-      load().catch(console.error);
+      // ---------- Load ----------
+      async function load() {
+        state.checkId = getCheckIdFromHash();
+        if (!state.checkId) {
+          checkTitle.textContent = 'No check selected';
+          return;
+        }
+        await loadMeta();
+        try {
+          const r = await fetch(`/api/history?checkId=${encodeURIComponent(state.checkId)}&sinceMinutes=${state.sinceMinutes}`);
+          const data = await r.json();
+          state.points = data.points || [];
+          renderStats(state.points);
+          drawChart(state.points);
+          drawTimelineStrip(state.points);
+          renderFailures(state.points);
+        } catch (e) { console.error(e); }
+      }
+
+      // ---------- UI wiring ----------
+      themeBtn.addEventListener('click', () => {
+        const order = ['dark', 'light', 'wallboard'];
+        state.theme = order[(order.indexOf(state.theme) + 1) % order.length];
+        try { localStorage.setItem('ethoraUptime.theme', state.theme); } catch {}
+        applyTheme();
+        // Redraw chart so it picks up new CSS-var colours.
+        drawChart(state.points);
+        drawTimelineStrip(state.points);
+        renderMeta();
+      });
+      refreshBtn.addEventListener('click', () => load());
+      backBtn.addEventListener('click', () => { if (history.length > 1) history.back(); else location.href = '/'; });
+      autoRefreshBtn.addEventListener('click', () => {
+        state.autoRefresh = !state.autoRefresh;
+        autoRefreshBtn.classList.toggle('active', state.autoRefresh);
+        autoRefreshBtn.textContent = state.autoRefresh ? 'Auto-refresh: on' : 'Auto-refresh';
+        if (state.autoRefreshTimer) clearInterval(state.autoRefreshTimer);
+        if (state.autoRefresh) {
+          state.autoRefreshTimer = setInterval(() => load(), state.autoRefreshMs);
+        }
+      });
+
+      for (const btn of document.querySelectorAll('.window-pills button')) {
+        btn.addEventListener('click', () => {
+          for (const b of document.querySelectorAll('.window-pills button')) b.classList.remove('active');
+          btn.classList.add('active');
+          state.sinceMinutes = Number(btn.getAttribute('data-mins') || 1440);
+          load();
+        });
+      }
+      window.addEventListener('hashchange', () => load());
+      window.addEventListener('resize', () => { drawChart(state.points); });
+
+      load();
     </script>
   </body>
 </html>
-
-

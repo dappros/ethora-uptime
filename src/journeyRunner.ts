@@ -416,6 +416,15 @@ export async function runJourney(env: JourneyEnv, opts?: JourneyOptions): Promis
     ownerUserToken = loginResp.json?.token
     if (!ownerUserToken) throw new Error('login-with-email: missing token')
 
+    // Verify the admin user token works on the canonical /me endpoint.
+    step('users_me')
+    const meResp = await httpJson(
+      'GET',
+      `${env.ethoraApiBase}/v1/users/me`,
+      { Authorization: `Bearer ${ownerUserToken}` }
+    )
+    if (!meResp.resp.ok) throw new Error(`users/me failed: ${meResp.resp.status} ${meResp.text}`)
+
     step('prepare_synthetic_app', { displayName: appDisplayName })
     syntheticApp = await prepareSyntheticAppV1(env.ethoraApiBase, ownerUserToken, appDisplayName)
     details.appId = syntheticApp.appId
@@ -426,6 +435,16 @@ export async function runJourney(env: JourneyEnv, opts?: JourneyOptions): Promis
     step('create_app', { appId: syntheticApp.appId })
 
     const newAppToken = syntheticApp.appToken
+
+    // Exercise app settings update (PUT /v1/apps/:id) — important admin flow.
+    step('update_app_settings')
+    const putAppResp = await httpJson(
+      'PUT',
+      `${env.ethoraApiBase}/v1/apps/${encodeURIComponent(String(syntheticApp.appId))}`,
+      { Authorization: `Bearer ${ownerUserToken}`, ...SYNTHETIC_HEADERS },
+      { appTagline: `uptime-${suffix}` }
+    )
+    if (!putAppResp.resp.ok) throw new Error(`update app failed: ${putAppResp.resp.status} ${putAppResp.text}`)
 
     for (let i = 0; i < env.usersCount; i++) {
       step('signup_user_v2', { i })
@@ -598,6 +617,52 @@ async function runJourneyB2B(env: JourneyEnv): Promise<JourneyResult> {
     )
     if (!getAppResp.resp.ok) throw new Error(`get app failed: ${getAppResp.resp.status} ${getAppResp.text}`)
 
+    // Exercise app-settings update via tenant actor.
+    step('patch_app_v2')
+    const patchAppResp = await httpJson(
+      'PATCH',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}`,
+      { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS },
+      { appTagline: `uptime-tagline-${suffix}` }
+    )
+    if (!patchAppResp.resp.ok) throw new Error(`patch app failed: ${patchAppResp.resp.status} ${patchAppResp.text}`)
+
+    // Provision default rooms — exercises the bulk room provisioning helper.
+    step('provision_rooms_v2')
+    const provisionResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/provision`,
+      { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS },
+      { rooms: [{ title: `Provisioned-${suffix}`, pinned: false }] }
+    )
+    if (!provisionResp.resp.ok) throw new Error(`provision rooms failed: ${provisionResp.resp.status} ${provisionResp.text}`)
+
+    // AI Bot read/write — best-effort: AI-bot service is optional and may be
+    // unavailable in some deployments. We exercise the API surface but treat
+    // 5xx specifically as a "skipped" so we don't false-RED the journey.
+    step('get_app_bot_v2')
+    const getBotResp = await httpJson(
+      'GET',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/bot`,
+      { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS }
+    )
+    if (getBotResp.resp.ok) {
+      step('put_app_bot_v2')
+      const putBotResp = await httpJson(
+        'PUT',
+        `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/bot`,
+        { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS },
+        { status: 'off', greetingMessage: `uptime-${suffix}` }
+      )
+      if (!putBotResp.resp.ok && putBotResp.resp.status < 500) {
+        throw new Error(`put app bot failed: ${putBotResp.resp.status} ${putBotResp.text}`)
+      }
+    } else if (getBotResp.resp.status < 500) {
+      throw new Error(`get app bot failed: ${getBotResp.resp.status} ${getBotResp.text}`)
+    } else {
+      step('get_app_bot_v2_skipped', { status: getBotResp.resp.status })
+    }
+
     step('create_app_token_v2')
     const createTokenResp = await httpJson(
       'POST',
@@ -615,6 +680,22 @@ async function runJourneyB2B(env: JourneyEnv): Promise<JourneyResult> {
       { Authorization: `Bearer ${parentServerToken}` }
     )
     if (!listTokensResp.resp.ok) throw new Error(`list app tokens failed: ${listTokensResp.resp.status} ${listTokensResp.text}`)
+
+    // Exercise app-token rotation — important for B2B credential management.
+    if (createdTokenId) {
+      step('rotate_app_token_v2')
+      const rotateResp = await httpJson(
+        'POST',
+        `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/tokens/${encodeURIComponent(createdTokenId)}/rotate`,
+        { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS },
+        { label: `uptime-${suffix}-rot` }
+      )
+      if (!rotateResp.resp.ok) throw new Error(`rotate app token failed: ${rotateResp.resp.status} ${rotateResp.text}`)
+      // Rotation revokes the old token id and may return a new one. If the API
+      // returns the new tokenId, track it so cleanup deletes the right record.
+      const rotatedTokenId = String(rotateResp.json?.tokenId || '').trim()
+      if (rotatedTokenId) createdTokenId = rotatedTokenId
+    }
 
     const user1Uuid = `b2b-${suffix}-u1`
     const user2Uuid = `b2b-${suffix}-u2`
@@ -689,6 +770,46 @@ async function runJourneyB2B(env: JourneyEnv): Promise<JourneyResult> {
       { chatName: createdChatName, members: [user2Uuid] }
     )
     if (!removeUserResp.resp.ok) throw new Error(`remove user from chat failed: ${removeUserResp.resp.status} ${removeUserResp.text}`)
+
+    // Broadcast — async announcement to selected chat rooms. Best-effort: jobId
+    // polling is short and bounded so we don't block on long-running broadcasts.
+    step('broadcast_v2')
+    const broadcastResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/chats/broadcast`,
+      { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS },
+      { rooms: [createdChatName], message: `uptime-broadcast-${suffix}` }
+    )
+    if (broadcastResp.resp.ok) {
+      const broadcastJobId = String(broadcastResp.json?.jobId || '').trim()
+      if (broadcastJobId) {
+        step('poll_broadcast_v2', { jobId: broadcastJobId })
+        const pollStart = Date.now()
+        while (Date.now() - pollStart < 8000) {
+          const jobResp = await httpJson(
+            'GET',
+            `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/chats/broadcast/${encodeURIComponent(broadcastJobId)}`,
+            { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS }
+          )
+          if (!jobResp.resp.ok) {
+            step('poll_broadcast_v2_skipped', { status: jobResp.resp.status })
+            break
+          }
+          const jstate = String(jobResp.json?.state || '')
+          if (jstate === 'completed' || jstate === 'failed') {
+            step('broadcast_v2_done', { state: jstate })
+            break
+          }
+          await new Promise((r) => setTimeout(r, 800))
+        }
+      } else {
+        step('broadcast_v2_no_jobid')
+      }
+    } else if (broadcastResp.resp.status < 500) {
+      throw new Error(`broadcast failed: ${broadcastResp.resp.status} ${broadcastResp.text}`)
+    } else {
+      step('broadcast_v2_skipped', { status: broadcastResp.resp.status })
+    }
 
     step('delete_users_batch_v2')
     const deleteUsersResp = await httpJson(
@@ -890,6 +1011,10 @@ async function runJourneyAdvanced(env: JourneyEnv, opts?: JourneyOptions): Promi
   const users: Array<{ email: string; password: string; token: string; xmppUsername: string; xmppPassword: string; id: string }> = []
   let testChatName: string | null = null
   let validationChatName: string | null = null
+
+  // Hoisted into the outer scope so the finally block can clean them up.
+  let createdShareToken: string | null = null
+  let createdFileId: string | null = null
 
   const xmppClients: any[] = []
   let observerXmpp: any | null = null
@@ -1154,6 +1279,51 @@ async function runJourneyAdvanced(env: JourneyEnv, opts?: JourneyOptions): Promi
     const fileResp = await fetch(mediaLoc, { method: 'GET' })
     if (!fileResp.ok) throw new Error(`file access failed: ${fileResp.status}`)
 
+    // Sharelink lifecycle — exercise file-sharing endpoints. Best-effort:
+    // share-link APIs need a fileId (returned by /v2/files upload), so we first
+    // upload a generic file (not chat-attached), then create + list + delete a
+    // share link for it. Both `createdShareToken` and `createdFileId` are
+    // declared in the outer scope so the `finally` block can tear them down.
+    try {
+      step('files_v2_upload')
+      const fForm = new FormData()
+      fForm.append('files', new Blob([`uptime-share-${suffix}`], { type: 'text/plain' }), `share-${suffix}.txt`)
+      const upResp = await fetch(`${env.ethoraApiBase}/v2/files/`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${alice.token}` },
+        body: fForm,
+      })
+      if (upResp.ok) {
+        const upJson = await upResp.json().catch(() => null)
+        // v2 upload may return either { results: [{...}] } or { files: [{...}] }
+        const upFile = upJson?.results?.[0] || upJson?.files?.[0] || upJson?.[0]
+        createdFileId = String(upFile?._id || upFile?.id || '').trim() || null
+
+        if (createdFileId) {
+          step('sharelink_create')
+          const linkResp = await httpJson(
+            'POST',
+            `${env.ethoraApiBase}/v1/sharelink`,
+            { Authorization: `Bearer ${alice.token}` },
+            { fileId: createdFileId }
+          )
+          if (linkResp.resp.ok) {
+            createdShareToken = String(linkResp.json?.token || linkResp.json?.result?.token || '').trim() || null
+            step('sharelink_list')
+            await httpJson('GET', `${env.ethoraApiBase}/v1/sharelink/`, { Authorization: `Bearer ${alice.token}` })
+          } else if (linkResp.resp.status < 500) {
+            step('sharelink_create_skipped', { status: linkResp.resp.status })
+          }
+        } else {
+          step('files_v2_upload_no_id')
+        }
+      } else {
+        step('files_v2_upload_skipped', { status: upResp.status })
+      }
+    } catch (e: any) {
+      step('sharelink_skipped', { message: e?.message || String(e) })
+    }
+
     step('remove_bob_from_test')
     const removeResp = await httpJson(
       'DELETE',
@@ -1191,6 +1361,29 @@ async function runJourneyAdvanced(env: JourneyEnv, opts?: JourneyOptions): Promi
   } finally {
     for (const client of xmppClients) {
       try { await client.stop() } catch {}
+    }
+    // Sharelink + file cleanup (only fires if the optional sharelink block ran)
+    if (createdShareToken && users[0]?.token) {
+      try {
+        step('cleanup_delete_sharelink')
+        const r = await httpJson(
+          'DELETE',
+          `${env.ethoraApiBase}/v1/sharelink/${encodeURIComponent(createdShareToken)}`,
+          { Authorization: `Bearer ${users[0].token}` }
+        )
+        if (!r.resp.ok) cleanupErr('delete_sharelink', new Error(`status=${r.resp.status} ${r.text}`))
+      } catch (e) { cleanupErr('delete_sharelink', e) }
+    }
+    if (createdFileId && users[0]?.token) {
+      try {
+        step('cleanup_delete_file')
+        const r = await httpJson(
+          'DELETE',
+          `${env.ethoraApiBase}/v2/files/${encodeURIComponent(createdFileId)}`,
+          { Authorization: `Bearer ${users[0].token}` }
+        )
+        if (!r.resp.ok) cleanupErr('delete_file', new Error(`status=${r.resp.status} ${r.text}`))
+      } catch (e) { cleanupErr('delete_file', e) }
     }
     if (testChatName && users[0]?.token) {
       try {
