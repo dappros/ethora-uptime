@@ -80,36 +80,44 @@ If you want a check to **not** be scheduled, set:
 
 You can still run it from the UI “Run” button (or via `POST /api/run-check`).
 
-## Synthetic apps (no analytics noise)
+## Synthetic apps (no analytics noise, full create/delete coverage)
 
 Synthetic journeys used to create a fresh app per run (`uptime-journey-<random>`), which made HubSpot/Slack
 report a "new app created" event every time, and cluttered the admin Apps list.
 
 This is now solved with a small contract between the uptime container and the backend:
 
-1. The uptime container always uses **stable, hard-coded display names** for its synthetic apps:
-   - Basic + advanced journeys: `__uptime__journey` (single shared app).
-   - B2B journey: `__uptime__journey_b2b` (single shared child app under the parent tenant).
-2. On each run, the journey **finds the existing app by displayName** (via `GET /v1/apps` or `GET /v2/apps`) and
-   only creates it on first run. Per-run isolation is achieved at the **user/chat level** (suffixed emails / chat UUIDs)
-   inside the same shared app.
-3. Cleanup deletes only the test users and chats created in that run; the synthetic app itself is preserved.
-4. The backend recognises any `displayName` starting with `__uptime__` (or any request carrying
-   `x-ethora-synthetic: 1`) and **skips marketing/CRM side-effects** for it: no HubSpot form submission,
-   no future Slack notifications, no welcome flow.
+1. The uptime container uses a **stable per-mode displayName** for its synthetic apps:
+   - `journey` (basic) → `__uptime__journey`
+   - `journey_advanced` → `__uptime__journey_advanced`
+   - `journey_b2b` → `__uptime__journey_b2b` (child app under the parent tenant)
+2. **Each run still creates AND deletes the app**. The stable displayName is only there
+   so the analytics bypass fires deterministically — it does NOT mean the app persists.
+3. Before creating, the run sweeps any orphan apps with the same displayName (left over
+   from a previous failed run) so leaks self-heal.
+4. The backend recognises any `displayName` starting with `__uptime__` (or any request
+   carrying `x-ethora-synthetic: 1`) and **skips marketing/CRM side-effects** for it:
+   no HubSpot form submission, no future Slack notifications, no welcome flow.
 
-Net result: one (or two) stable rows in the admin Apps list and zero analytics noise per uptime tick.
+Result:
+- Full regression coverage of `POST /v1/apps`, `POST /v2/apps`, `DELETE /v1/apps/:id`,
+  `DELETE /v2/apps/:id` on every uptime tick.
+- Zero HubSpot/Slack noise.
+- Admin Apps list never accumulates synthetic apps — they exist only for the brief
+  duration of an in-flight run.
+- If a run dies mid-way, the next run automatically deletes the orphan(s) and reports
+  the cleanup count in the wallboard "Details" modal (`cleaned N orphans` pill).
 
-If you want to keep the old behaviour, override `ETHORA_APP_NAME_PREFIX` in `uptime.env` to a non-`__uptime__`
-prefix — but you'll lose the analytics suppression too.
+If you want to keep the old behaviour, override `ETHORA_APP_NAME_PREFIX` in `uptime.env`
+to a non-`__uptime__` prefix — but you'll lose the analytics suppression too.
 
 ## Journey modes
 
-There are two supported journey levels (configured via `checks[].id`):
+There are three supported journey levels (configured via `checks[].id`):
 
-- `journey` → basic flow (find/create synthetic app + users + 1 chat + add member)
-- `journey_advanced` → comprehensive flow (2 chats, membership changes, XMPP delivery, file upload) — shares the same synthetic app as `journey`
-- `journey_b2b` → tenant/B2B admin flow (find/create child app, app token, users, chat, membership changes, cleanup)
+- `journey` → basic flow (orphan-sweep + create synthetic app + users + 1 chat + add member + delete chat/users/app)
+- `journey_advanced` → comprehensive flow (2 chats, membership changes, XMPP delivery, file upload) — uses its own distinct synthetic app so it can run concurrently with `journey`
+- `journey_b2b` → tenant/B2B admin flow (orphan-sweep + create child app, app token, users, chat, membership changes, full cleanup)
 
 ### Required env for **basic** journey
 

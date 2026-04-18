@@ -663,12 +663,14 @@
           `;
         }).join('');
 
+        const orphans = Number(details?.orphansCleaned || 0);
         const headerPills = `
           <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:10px;">
             <span class="pill"><span class="dot ${details?.ok ? 'green' : 'red'}"></span>${details?.ok ? 'OK' : 'FAIL'}</span>
             ${details?.durationMs != null ? `<span class="pill">${escapeHtml(details.durationMs)} ms total</span>` : ''}
-            ${details?.appId ? `<span class="pill">appId ${escapeHtml(details.appId)}${details?.appReused ? ' (reused)' : ' (created)'}</span>` : ''}
+            ${details?.appId ? `<span class="pill">appId ${escapeHtml(details.appId)}</span>` : ''}
             ${details?.mode ? `<span class="pill">mode ${escapeHtml(details.mode)}</span>` : ''}
+            ${orphans > 0 ? `<span class="pill" style="color: var(--amber);" title="A previous run left orphan synthetic apps behind. They were deleted before this run created its own.">cleaned ${orphans} orphan${orphans === 1 ? '' : 's'}</span>` : ''}
             ${errorMsg ? `<span class="pill" style="color: var(--red);">error: ${escapeHtml(errorMsg)}</span>` : ''}
           </div>
         `;
