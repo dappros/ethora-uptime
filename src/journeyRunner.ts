@@ -1503,12 +1503,21 @@ async function runJourneyB2B(env: JourneyEnv): Promise<JourneyResult> {
 
     // Broadcast — async announcement to selected chat rooms. Best-effort: jobId
     // polling is short and bounded so we don't block on long-running broadcasts.
+    //
+    // Body shape MUST match broadcastChatsV2.service.js Joi schema:
+    //   { text: required, chatNames | chatIds | allRooms=true } (one of the targets is required)
+    // and matches the Swagger contract documented for both
+    //   POST /v2/chats/broadcast              (legacy, app-auth)
+    //   POST /v2/apps/{appId}/chats/broadcast (preferred, tenant-actor / B2B)
+    // see: https://api.chat-qa.ethora.com/api-docs/#/Chats/post_v2_apps__appId__chats_broadcast
+    // We send via the app-scoped (B2B/tenant-actor) variant here using the parent
+    // server JWT, and target the chat we created earlier by its internal name.
     step('broadcast_v2')
     const broadcastResp = await httpJson(
       'POST',
       `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/chats/broadcast`,
       { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS },
-      { rooms: [createdChatName], message: `uptime-broadcast-${suffix}` }
+      { chatNames: [createdChatName], text: `uptime-broadcast-${suffix}` }
     )
     if (broadcastResp.resp.ok) {
       const broadcastJobId = String(broadcastResp.json?.jobId || '').trim()
