@@ -65,6 +65,7 @@ There are two supported journey levels (configured via `checks[].id`):
 - `journey` → basic flow (app + users + 1 chat + add member)
 - `journey_advanced` → comprehensive flow (2 chats, membership changes, XMPP delivery, file upload)
 - `journey_b2b` → tenant/B2B admin flow (create app, app token, users, chat, membership changes, cleanup)
+- `journey_customer_workflow` → mirrors a typical customer (e.g. Vitall) integration sequence: account-enabled → users-batch → chat-with-members (using the `${appId}_${uuid}` xmppUsername format in `members[]` like the customer does) → patient deletion → account deletion. Adds an `assertNoDoublePrefix` check on every xmppUsername returned across all steps to catch the `${appId}_${appId}_*` double-prefix regression.
 
 ### Required env for **basic** journey
 
@@ -98,6 +99,10 @@ Compatibility fallback:
 - `ETHORA_CHAT_APP_SECRET`
 
 if the `ETHORA_B2B_*` variables are not set.
+
+### Env for **customer_workflow** journey
+
+Same env as the B2B journey (`ETHORA_B2B_APP_ID` / `ETHORA_B2B_APP_SECRET`, with the `ETHORA_CHAT_*` fallback). It uses the parent server token to create an isolated test app, run the customer scenarios, and tear everything down at the end.
 
 ## Push validation check (optional)
 
