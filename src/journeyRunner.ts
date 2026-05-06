@@ -11,7 +11,7 @@ export type JourneyEnv = {
   usersCount: number
 }
 
-type JourneyMode = 'basic' | 'advanced' | 'b2b'
+type JourneyMode = 'basic' | 'advanced' | 'b2b' | 'customer_workflow'
 
 type JourneyOptions = {
   mode?: string
@@ -91,6 +91,7 @@ function resolveMode(env: JourneyEnv, opts?: JourneyOptions): JourneyMode {
     .filter(Boolean)
     .map((s) => String(s).toLowerCase())
   const value = candidates.find(Boolean) || 'basic'
+  if (value.includes('customer_workflow') || value.includes('customer-workflow')) return 'customer_workflow'
   if (value.includes('b2b') || value.includes('server')) return 'b2b'
   if (value.includes('advanced') || value.includes('comprehensive')) return 'advanced'
   return 'basic'
@@ -143,6 +144,22 @@ function getResultObject(input: any) {
   return input?.result || input?.app || input
 }
 
+// Bug-detection helper: in multi-tenant Ethora, xmppUsername is supposed to be
+// the form `${appId}_${uuid}`. A previous regression caused some endpoints to
+// return `${appId}_${appId}_${uuid}` (double prefix), which then breaks
+// downstream lookups (404 USER_NOT_FOUND in chat creation, 400 in user fetch).
+// Throwing here surfaces the regression as a journey failure with full context.
+function assertNoDoublePrefix(appId: string, xmppUsername: any, where: string) {
+  const value = String(xmppUsername || '').trim()
+  if (!value || !appId) return
+  const doubled = `${appId}_${appId}_`
+  if (value.startsWith(doubled)) {
+    throw new Error(
+      `xmppUsername has double appId prefix at ${where}: appId=${appId} xmppUsername=${value}`
+    )
+  }
+}
+
 async function pollUserBatchJob(apiBase: string, appId: string, authToken: string, jobId: string, timeoutMs = 120000) {
   const startedAt = Date.now()
   while (Date.now() - startedAt < timeoutMs) {
@@ -162,6 +179,7 @@ async function pollUserBatchJob(apiBase: string, appId: string, authToken: strin
 
 export async function runJourney(env: JourneyEnv, opts?: JourneyOptions): Promise<JourneyResult> {
   const mode = resolveMode(env, opts)
+  if (mode === 'customer_workflow') return await runJourneyCustomerWorkflow(env)
   if (mode === 'b2b') return await runJourneyB2B(env)
   if (mode === 'advanced') return await runJourneyAdvanced(env, opts)
 
@@ -440,6 +458,10 @@ async function runJourneyB2B(env: JourneyEnv): Promise<JourneyResult> {
     if (!batchResults.some((r: any) => ['created', 'exists', 'uuid_exists'].includes(String(r?.status || '')))) {
       throw new Error('user batch did not create any users')
     }
+    for (const r of batchResults) {
+      assertNoDoublePrefix(createdAppId, r?.xmppUsername, 'users/batch.results[].xmppUsername')
+      assertNoDoublePrefix(createdAppId, r?.user?.xmppUsername, 'users/batch.results[].user.xmppUsername')
+    }
 
     step('create_chat_v2')
     const createChatResp = await httpJson(
@@ -470,13 +492,43 @@ async function runJourneyB2B(env: JourneyEnv): Promise<JourneyResult> {
     )
     if (!addUserResp.resp.ok) throw new Error(`add user to chat failed: ${addUserResp.resp.status} ${addUserResp.text}`)
 
+    step('patch_chat_users_v2')
+    const patchUsersResp = await httpJson(
+      'PATCH',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/chats/users`,
+      { Authorization: `Bearer ${parentServerToken}` },
+      {
+        users: [
+          {
+            firstName: 'B2B',
+            lastName: 'UserTwoUpdated',
+            uuid: `${createdAppId}_${user2Uuid}`,
+            xmppUsername: `${createdAppId}_${user2Uuid}`,
+          },
+        ],
+      }
+    )
+    if (!patchUsersResp.resp.ok) throw new Error(`patch chat users failed: ${patchUsersResp.resp.status} ${patchUsersResp.text}`)
+    const patchResults = Array.isArray(patchUsersResp.json?.results) ? patchUsersResp.json.results : []
+    for (const r of patchResults) {
+      assertNoDoublePrefix(createdAppId, r?.xmppUsername, 'PATCH chats/users.results[].xmppUsername')
+      assertNoDoublePrefix(createdAppId, r?.user?.xmppUsername, 'PATCH chats/users.results[].user.xmppUsername')
+    }
+
     step('get_user_chats_v2')
     const getUserChatsResp = await httpJson(
       'GET',
-      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/users/${encodeURIComponent(user2Uuid)}/chats?limit=20&includeMembers=false`,
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/users/${encodeURIComponent(user2Uuid)}/chats?limit=20&includeMembers=true`,
       { Authorization: `Bearer ${parentServerToken}` }
     )
     if (!getUserChatsResp.resp.ok) throw new Error(`get user chats failed: ${getUserChatsResp.resp.status} ${getUserChatsResp.text}`)
+    const userChats = Array.isArray(getUserChatsResp.json?.chats) ? getUserChatsResp.json.chats : []
+    for (const chat of userChats) {
+      const members = Array.isArray(chat?.members) ? chat.members : []
+      for (const m of members) {
+        assertNoDoublePrefix(createdAppId, m?.xmppUsername, 'GET users/:id/chats[].members[].xmppUsername')
+      }
+    }
 
     step('remove_user_from_chat_v2')
     const removeUserResp = await httpJson(
@@ -571,6 +623,263 @@ async function runJourneyB2B(env: JourneyEnv): Promise<JourneyResult> {
     if (createdAppId) {
       try {
         step('cleanup_delete_app_v2')
+        await httpJson(
+          'DELETE',
+          `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}`,
+          { Authorization: `Bearer ${parentServerToken}` }
+        )
+      } catch {}
+    }
+  }
+}
+
+// Differences vs. b2b journey:
+//  - POST /chats body is sent with `members` pre-populated in `${appId}_${uuid}` format
+//    (this is what Eva does and is what triggered USER_NOT_FOUND 404 in production).
+//  - assertNoDoublePrefix is invoked on every response that returns xmppUsername.
+async function runJourneyCustomerWorkflow(env: JourneyEnv): Promise<JourneyResult> {
+  const suffix = randSuffix()
+  const appDisplayName = `${env.appNamePrefix}-cw-${suffix}`
+  const details: Record<string, any> = {
+    suffix,
+    appDisplayName,
+    mode: 'customer_workflow',
+    scenarios: [],
+    steps: [],
+  }
+
+  const b2b = getB2BEnvFromProcess()
+  const parentServerToken = createServerToken(b2b.appId, b2b.appSecret)
+  const step = (name: string, extra?: any) => details.steps.push({ name, ...extra, ts: new Date().toISOString() })
+  const recordScenario = (name: string, extra?: any) =>
+    details.scenarios.push({ name, ts: new Date().toISOString(), ...extra })
+
+  let createdAppId: string | null = null
+  let createdChatName: string | null = null
+  const createdUserUuids: string[] = []
+
+  try {
+    // === Scenario B: "When an account/clinic is enabled" ===
+    // 1) POST /v2/apps
+    step('cw_B_create_app')
+    const createAppResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v2/apps`,
+      { Authorization: `Bearer ${parentServerToken}` },
+      { displayName: appDisplayName }
+    )
+    if (!createAppResp.resp.ok) throw new Error(`scenario B: create app failed: ${createAppResp.resp.status} ${createAppResp.text}`)
+    createdAppId = String(
+      createAppResp.json?.app?._id ||
+        createAppResp.json?.result?._id ||
+        createAppResp.json?._id ||
+        ''
+    ).trim()
+    if (!createdAppId) throw new Error('scenario B: create app: missing app id')
+
+    // === Scenario A (also part of B): "When a new user gets added" ===
+    const userPatientUuid = `cw-${suffix}-patient`
+    const userCareAUuid = `cw-${suffix}-care-a`
+    const userCareBUuid = `cw-${suffix}-care-b`
+    createdUserUuids.push(userPatientUuid, userCareAUuid, userCareBUuid)
+
+    // 2) POST /v2/apps/:appId/users/batch
+    step('cw_A_create_users_batch')
+    const createUsersResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/users/batch`,
+      { Authorization: `Bearer ${parentServerToken}` },
+      {
+        bypassEmailConfirmation: true,
+        usersList: [
+          { uuid: userPatientUuid, email: `${userPatientUuid}@example.com`, firstName: 'Patient', lastName: `Uptime${suffix}`, password: `Pa-${suffix}-1` },
+          { uuid: userCareAUuid, email: `${userCareAUuid}@example.com`, firstName: 'CareA', lastName: `Uptime${suffix}`, password: `Pa-${suffix}-2` },
+          { uuid: userCareBUuid, email: `${userCareBUuid}@example.com`, firstName: 'CareB', lastName: `Uptime${suffix}`, password: `Pa-${suffix}-3` },
+        ],
+      }
+    )
+    if (createUsersResp.resp.status !== 202) {
+      throw new Error(`scenario A: create users batch failed: ${createUsersResp.resp.status} ${createUsersResp.text}`)
+    }
+    const usersJobId = String(createUsersResp.json?.jobId || '').trim()
+    if (!usersJobId) throw new Error('scenario A: create users batch: missing jobId')
+
+    // 3) GET /v2/apps/:appId/users/batch/:jobId  (poll for completion)
+    step('cw_A_poll_users_batch', { jobId: usersJobId })
+    const usersBatchJob = await pollUserBatchJob(env.ethoraApiBase, createdAppId, parentServerToken, usersJobId)
+    const usersBatchResults = Array.isArray(usersBatchJob?.result?.results) ? usersBatchJob.result.results : []
+    if (!usersBatchResults.some((r: any) => ['created', 'exists', 'uuid_exists'].includes(String(r?.status || '')))) {
+      throw new Error('scenario A: user batch did not create any users')
+    }
+    for (const r of usersBatchResults) {
+      assertNoDoublePrefix(createdAppId, r?.xmppUsername, 'cw users/batch.results[].xmppUsername')
+      assertNoDoublePrefix(createdAppId, r?.user?.xmppUsername, 'cw users/batch.results[].user.xmppUsername')
+    }
+
+    // 4) POST /v2/apps/:appId/chats — pass members pre-formatted as `${appId}_${uuid}` (Eva's exact pattern).
+    //    This is what triggered "USER_NOT_FOUND 404" in production; if the API has regressed, this step fails.
+    const chatTitle = `Customer Care Chat ${suffix}`
+    const chatUuid = `cw-chat-${suffix}`
+    const careTeamMembers = [userPatientUuid, userCareAUuid, userCareBUuid].map(
+      (u) => `${createdAppId}_${u}`
+    )
+    step('cw_A_create_chat_with_members', { membersCount: careTeamMembers.length })
+    const createChatResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/chats`,
+      { Authorization: `Bearer ${parentServerToken}` },
+      {
+        title: chatTitle,
+        uuid: chatUuid,
+        type: 'group',
+        members: careTeamMembers,
+        description: `customer_workflow scenario A/B (${suffix})`,
+      }
+    )
+    if (!createChatResp.resp.ok) {
+      throw new Error(
+        `scenario A: create chat with members failed: ${createChatResp.resp.status} ${createChatResp.text}`
+      )
+    }
+    createdChatName = String(
+      createChatResp.json?.result?.name ||
+        createChatResp.json?.result?.jid ||
+        createChatResp.json?.name ||
+        ''
+    ).trim()
+    if (!createdChatName) throw new Error('scenario A: create chat: missing room name')
+
+    // 5) GET /v2/apps/:appId/users/:userId/chats?includeMembers=true
+    //    This is the variant Eva actually uses on the client side.
+    step('cw_A_get_user_chats_with_members')
+    const getUserChatsResp = await httpJson(
+      'GET',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/users/${encodeURIComponent(userPatientUuid)}/chats?limit=20&includeMembers=true`,
+      { Authorization: `Bearer ${parentServerToken}` }
+    )
+    if (!getUserChatsResp.resp.ok) {
+      throw new Error(`scenario A: get user chats failed: ${getUserChatsResp.resp.status} ${getUserChatsResp.text}`)
+    }
+    const userChats = Array.isArray(getUserChatsResp.json?.chats) ? getUserChatsResp.json.chats : []
+    if (!userChats.length) {
+      throw new Error('scenario A: GET user chats returned empty list (chat membership likely broken)')
+    }
+    for (const chat of userChats) {
+      const members = Array.isArray(chat?.members) ? chat.members : []
+      for (const m of members) {
+        assertNoDoublePrefix(createdAppId, m?.xmppUsername, 'cw GET users/:id/chats[].members[].xmppUsername')
+      }
+    }
+
+    // 6) PATCH /v2/apps/:appId/chats/users — Eva flagged double-prefix bug here specifically.
+    step('cw_A_patch_chat_users')
+    const patchUsersResp = await httpJson(
+      'PATCH',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/chats/users`,
+      { Authorization: `Bearer ${parentServerToken}` },
+      {
+        users: [
+          {
+            firstName: 'CareA',
+            lastName: `UpdatedUptime${suffix}`,
+            uuid: `${createdAppId}_${userCareAUuid}`,
+            xmppUsername: `${createdAppId}_${userCareAUuid}`,
+          },
+        ],
+      }
+    )
+    if (!patchUsersResp.resp.ok) {
+      throw new Error(`scenario A: PATCH chats/users failed: ${patchUsersResp.resp.status} ${patchUsersResp.text}`)
+    }
+    const patchResults = Array.isArray(patchUsersResp.json?.results) ? patchUsersResp.json.results : []
+    for (const r of patchResults) {
+      assertNoDoublePrefix(createdAppId, r?.xmppUsername, 'cw PATCH chats/users.results[].xmppUsername')
+      assertNoDoublePrefix(createdAppId, r?.user?.xmppUsername, 'cw PATCH chats/users.results[].user.xmppUsername')
+    }
+
+    recordScenario('account_enabled', { ok: true })
+    recordScenario('user_added', { ok: true, note: 'covered by scenario B (same code path)' })
+
+    // === Scenario C: "When a chat user is deleted" ===
+    //   1) DELETE /v2/apps/:appId/users/batch (the patient)
+    //   2) DELETE /v2/apps/:appId/chats       (their chat, since they are a "patient")
+    step('cw_C_delete_patient_user')
+    const deletePatientResp = await httpJson(
+      'DELETE',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/users/batch`,
+      { Authorization: `Bearer ${parentServerToken}` },
+      { usersIdList: [userPatientUuid] }
+    )
+    if (!deletePatientResp.resp.ok) {
+      throw new Error(`scenario C: delete user failed: ${deletePatientResp.resp.status} ${deletePatientResp.text}`)
+    }
+    // Drop deleted user from cleanup tracker
+    const idx = createdUserUuids.indexOf(userPatientUuid)
+    if (idx >= 0) createdUserUuids.splice(idx, 1)
+
+    step('cw_C_delete_patient_chat')
+    const deleteChatResp = await httpJson(
+      'DELETE',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/chats`,
+      { Authorization: `Bearer ${parentServerToken}` },
+      { name: createdChatName }
+    )
+    if (!deleteChatResp.resp.ok) {
+      throw new Error(`scenario C: delete chat failed: ${deleteChatResp.resp.status} ${deleteChatResp.text}`)
+    }
+    createdChatName = null
+
+    recordScenario('user_deleted', { ok: true })
+
+    // === Scenario D: "When an account/clinic is deleted" ===
+    // Customer currently archives on their side; DELETE /v2/apps is documented as a
+    // future action. We exercise it here as the natural cleanup of the test app.
+    step('cw_D_delete_app')
+    const deleteAppResp = await httpJson(
+      'DELETE',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}`,
+      { Authorization: `Bearer ${parentServerToken}` }
+    )
+    if (!deleteAppResp.resp.ok) {
+      throw new Error(`scenario D: delete app failed: ${deleteAppResp.resp.status} ${deleteAppResp.text}`)
+    }
+    createdAppId = null
+    createdUserUuids.length = 0
+
+    recordScenario('account_deleted', { ok: true })
+
+    step('ok')
+    return { ok: true, details }
+  } catch (e: any) {
+    step('error', { message: e?.message || String(e) })
+    return { ok: false, details: { ...details, error: e?.message || String(e) } }
+  } finally {
+    // Best-effort cleanup of anything still hanging around (test failure path).
+    if (createdChatName && createdAppId) {
+      try {
+        step('cleanup_delete_chat')
+        await httpJson(
+          'DELETE',
+          `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/chats`,
+          { Authorization: `Bearer ${parentServerToken}` },
+          { name: createdChatName }
+        )
+      } catch {}
+    }
+    if (createdUserUuids.length && createdAppId) {
+      try {
+        step('cleanup_delete_users_batch')
+        await httpJson(
+          'DELETE',
+          `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/users/batch`,
+          { Authorization: `Bearer ${parentServerToken}` },
+          { usersIdList: createdUserUuids }
+        )
+      } catch {}
+    }
+    if (createdAppId) {
+      try {
+        step('cleanup_delete_app')
         await httpJson(
           'DELETE',
           `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}`,
