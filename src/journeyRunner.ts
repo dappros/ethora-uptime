@@ -635,7 +635,8 @@ async function runJourneyB2B(env: JourneyEnv): Promise<JourneyResult> {
 
 // Differences vs. b2b journey:
 //  - POST /chats body is sent with `members` pre-populated in `${appId}_${uuid}` format
-//    (this is what Eva does and is what triggered USER_NOT_FOUND 404 in production).
+//    (this is the format reported by customer client integrations, and it had previously
+//    triggered USER_NOT_FOUND 404 in production).
 //  - assertNoDoublePrefix is invoked on every response that returns xmppUsername.
 async function runJourneyCustomerWorkflow(env: JourneyEnv): Promise<JourneyResult> {
   const suffix = randSuffix()
@@ -659,7 +660,7 @@ async function runJourneyCustomerWorkflow(env: JourneyEnv): Promise<JourneyResul
   const createdUserUuids: string[] = []
 
   try {
-    // === Scenario B: "When an account/clinic is enabled" ===
+    // === Scenario B: "When an account is enabled" ===
     // 1) POST /v2/apps
     step('cw_B_create_app')
     const createAppResp = await httpJson(
@@ -678,10 +679,10 @@ async function runJourneyCustomerWorkflow(env: JourneyEnv): Promise<JourneyResul
     if (!createdAppId) throw new Error('scenario B: create app: missing app id')
 
     // === Scenario A (also part of B): "When a new user gets added" ===
-    const userPatientUuid = `cw-${suffix}-patient`
-    const userCareAUuid = `cw-${suffix}-care-a`
-    const userCareBUuid = `cw-${suffix}-care-b`
-    createdUserUuids.push(userPatientUuid, userCareAUuid, userCareBUuid)
+    const userOwnerUuid = `cw-${suffix}-owner`
+    const userMember1Uuid = `cw-${suffix}-m1`
+    const userMember2Uuid = `cw-${suffix}-m2`
+    createdUserUuids.push(userOwnerUuid, userMember1Uuid, userMember2Uuid)
 
     // 2) POST /v2/apps/:appId/users/batch
     step('cw_A_create_users_batch')
@@ -692,9 +693,9 @@ async function runJourneyCustomerWorkflow(env: JourneyEnv): Promise<JourneyResul
       {
         bypassEmailConfirmation: true,
         usersList: [
-          { uuid: userPatientUuid, email: `${userPatientUuid}@example.com`, firstName: 'Patient', lastName: `Uptime${suffix}`, password: `Pa-${suffix}-1` },
-          { uuid: userCareAUuid, email: `${userCareAUuid}@example.com`, firstName: 'CareA', lastName: `Uptime${suffix}`, password: `Pa-${suffix}-2` },
-          { uuid: userCareBUuid, email: `${userCareBUuid}@example.com`, firstName: 'CareB', lastName: `Uptime${suffix}`, password: `Pa-${suffix}-3` },
+          { uuid: userOwnerUuid, email: `${userOwnerUuid}@example.com`, firstName: 'Owner', lastName: `Uptime${suffix}`, password: `Pa-${suffix}-1` },
+          { uuid: userMember1Uuid, email: `${userMember1Uuid}@example.com`, firstName: 'Member1', lastName: `Uptime${suffix}`, password: `Pa-${suffix}-2` },
+          { uuid: userMember2Uuid, email: `${userMember2Uuid}@example.com`, firstName: 'Member2', lastName: `Uptime${suffix}`, password: `Pa-${suffix}-3` },
         ],
       }
     )
@@ -716,14 +717,15 @@ async function runJourneyCustomerWorkflow(env: JourneyEnv): Promise<JourneyResul
       assertNoDoublePrefix(createdAppId, r?.user?.xmppUsername, 'cw users/batch.results[].user.xmppUsername')
     }
 
-    // 4) POST /v2/apps/:appId/chats — pass members pre-formatted as `${appId}_${uuid}` (Eva's exact pattern).
-    //    This is what triggered "USER_NOT_FOUND 404" in production; if the API has regressed, this step fails.
-    const chatTitle = `Customer Care Chat ${suffix}`
+    // 4) POST /v2/apps/:appId/chats — pass members pre-formatted as `${appId}_${uuid}` (the
+    //    format customer client integrations send). This had triggered "USER_NOT_FOUND 404"
+    //    in production; if the API has regressed, this step fails.
+    const chatTitle = `Customer Group Chat ${suffix}`
     const chatUuid = `cw-chat-${suffix}`
-    const careTeamMembers = [userPatientUuid, userCareAUuid, userCareBUuid].map(
+    const chatMembers = [userOwnerUuid, userMember1Uuid, userMember2Uuid].map(
       (u) => `${createdAppId}_${u}`
     )
-    step('cw_A_create_chat_with_members', { membersCount: careTeamMembers.length })
+    step('cw_A_create_chat_with_members', { membersCount: chatMembers.length })
     const createChatResp = await httpJson(
       'POST',
       `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/chats`,
@@ -732,7 +734,7 @@ async function runJourneyCustomerWorkflow(env: JourneyEnv): Promise<JourneyResul
         title: chatTitle,
         uuid: chatUuid,
         type: 'group',
-        members: careTeamMembers,
+        members: chatMembers,
         description: `customer_workflow scenario A/B (${suffix})`,
       }
     )
@@ -750,11 +752,11 @@ async function runJourneyCustomerWorkflow(env: JourneyEnv): Promise<JourneyResul
     if (!createdChatName) throw new Error('scenario A: create chat: missing room name')
 
     // 5) GET /v2/apps/:appId/users/:userId/chats?includeMembers=true
-    //    This is the variant Eva actually uses on the client side.
+    //    This is the variant customer client integrations use to fetch room state.
     step('cw_A_get_user_chats_with_members')
     const getUserChatsResp = await httpJson(
       'GET',
-      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/users/${encodeURIComponent(userPatientUuid)}/chats?limit=20&includeMembers=true`,
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/users/${encodeURIComponent(userOwnerUuid)}/chats?limit=20&includeMembers=true`,
       { Authorization: `Bearer ${parentServerToken}` }
     )
     if (!getUserChatsResp.resp.ok) {
@@ -771,7 +773,8 @@ async function runJourneyCustomerWorkflow(env: JourneyEnv): Promise<JourneyResul
       }
     }
 
-    // 6) PATCH /v2/apps/:appId/chats/users — Eva flagged double-prefix bug here specifically.
+    // 6) PATCH /v2/apps/:appId/chats/users — endpoint where customer client integrations
+    //    previously hit a double-prefix regression on `results[].user.xmppUsername`.
     step('cw_A_patch_chat_users')
     const patchUsersResp = await httpJson(
       'PATCH',
@@ -780,10 +783,10 @@ async function runJourneyCustomerWorkflow(env: JourneyEnv): Promise<JourneyResul
       {
         users: [
           {
-            firstName: 'CareA',
+            firstName: 'Member1',
             lastName: `UpdatedUptime${suffix}`,
-            uuid: `${createdAppId}_${userCareAUuid}`,
-            xmppUsername: `${createdAppId}_${userCareAUuid}`,
+            uuid: `${createdAppId}_${userMember1Uuid}`,
+            xmppUsername: `${createdAppId}_${userMember1Uuid}`,
           },
         ],
       }
@@ -801,23 +804,23 @@ async function runJourneyCustomerWorkflow(env: JourneyEnv): Promise<JourneyResul
     recordScenario('user_added', { ok: true, note: 'covered by scenario B (same code path)' })
 
     // === Scenario C: "When a chat user is deleted" ===
-    //   1) DELETE /v2/apps/:appId/users/batch (the patient)
-    //   2) DELETE /v2/apps/:appId/chats       (their chat, since they are a "patient")
-    step('cw_C_delete_patient_user')
-    const deletePatientResp = await httpJson(
+    //   1) DELETE /v2/apps/:appId/users/batch (the chat owner)
+    //   2) DELETE /v2/apps/:appId/chats       (their associated chat)
+    step('cw_C_delete_owner_user')
+    const deleteOwnerResp = await httpJson(
       'DELETE',
       `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/users/batch`,
       { Authorization: `Bearer ${parentServerToken}` },
-      { usersIdList: [userPatientUuid] }
+      { usersIdList: [userOwnerUuid] }
     )
-    if (!deletePatientResp.resp.ok) {
-      throw new Error(`scenario C: delete user failed: ${deletePatientResp.resp.status} ${deletePatientResp.text}`)
+    if (!deleteOwnerResp.resp.ok) {
+      throw new Error(`scenario C: delete user failed: ${deleteOwnerResp.resp.status} ${deleteOwnerResp.text}`)
     }
     // Drop deleted user from cleanup tracker
-    const idx = createdUserUuids.indexOf(userPatientUuid)
+    const idx = createdUserUuids.indexOf(userOwnerUuid)
     if (idx >= 0) createdUserUuids.splice(idx, 1)
 
-    step('cw_C_delete_patient_chat')
+    step('cw_C_delete_owner_chat')
     const deleteChatResp = await httpJson(
       'DELETE',
       `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/chats`,
@@ -831,9 +834,9 @@ async function runJourneyCustomerWorkflow(env: JourneyEnv): Promise<JourneyResul
 
     recordScenario('user_deleted', { ok: true })
 
-    // === Scenario D: "When an account/clinic is deleted" ===
-    // Customer currently archives on their side; DELETE /v2/apps is documented as a
-    // future action. We exercise it here as the natural cleanup of the test app.
+    // === Scenario D: "When an account is deleted" ===
+    // Some customers archive on their side rather than deleting; here we exercise the
+    // DELETE /v2/apps endpoint as the natural cleanup of the synthetic test app.
     step('cw_D_delete_app')
     const deleteAppResp = await httpJson(
       'DELETE',

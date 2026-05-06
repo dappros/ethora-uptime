@@ -65,7 +65,7 @@ There are two supported journey levels (configured via `checks[].id`):
 - `journey` → basic flow (app + users + 1 chat + add member)
 - `journey_advanced` → comprehensive flow (2 chats, membership changes, XMPP delivery, file upload)
 - `journey_b2b` → tenant/B2B admin flow (create app, app token, users, chat, membership changes, cleanup)
-- `journey_customer_workflow` → mirrors a typical customer (e.g. Vitall) integration sequence: account-enabled → users-batch → chat-with-members (using the `${appId}_${uuid}` xmppUsername format in `members[]` like the customer does) → patient deletion → account deletion. Adds an `assertNoDoublePrefix` check on every xmppUsername returned across all steps to catch the `${appId}_${appId}_*` double-prefix regression.
+- `journey_customer_workflow` → mirrors a typical customer integration sequence: account-enabled → users-batch → chat-with-members (using the `${appId}_${uuid}` xmppUsername format in `members[]` like the customer does) → user deletion → account deletion. Adds an `assertNoDoublePrefix` check on every xmppUsername returned across all steps to catch the `${appId}_${appId}_*` double-prefix regression.
 
 ### Required env for **basic** journey
 
