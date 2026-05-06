@@ -69,8 +69,8 @@ instances:
         intervalSeconds: 7200
         timeoutMs: 240000
 
-      # Optional: customer-workflow regression journey (mirrors typical Vitall integration:
-      #   account enabled -> users batch -> chat with members -> patient deletion -> account deletion).
+      # Optional: customer-workflow regression journey (mirrors a typical customer integration:
+      #   account enabled -> users batch -> chat with members -> user deletion -> account deletion).
       # Asserts no `${appId}_${appId}_*` double-prefix on every xmppUsername in any response.
       - id: journey_customer_workflow
         name: Synthetic_journey_customer_workflow
