@@ -46,6 +46,9 @@ export const SYNTHETIC_APP_DISPLAY_NAME_APP_STATS = '__uptime__journey_app_stats
 export const SYNTHETIC_APP_DISPLAY_NAME_V1_FILES = '__uptime__journey_v1_files'
 export const SYNTHETIC_APP_DISPLAY_NAME_PRIVATE_CHAT = '__uptime__journey_private_chat'
 export const SYNTHETIC_APP_DISPLAY_NAME_V2_USER_CHATS = '__uptime__journey_v2_user_chats'
+// Lifecycle (2607+): soft-delete -> restore -> export -> hard-delete -> import.
+// Verifies the full backup/restore promise including end-user round-trip.
+export const SYNTHETIC_APP_DISPLAY_NAME_LIFECYCLE = '__uptime__journey_lifecycle'
 
 // Stable header so a server admin can also distinguish these calls in logs/proxy rules.
 const SYNTHETIC_HEADERS: Record<string, string> = { 'x-ethora-synthetic': '1' }
@@ -75,6 +78,7 @@ type JourneyMode =
   | 'v1_files'
   | 'private_chat'
   | 'v2_user_chats'
+  | 'lifecycle'
 
 type JourneyOptions = {
   mode?: string
@@ -165,6 +169,7 @@ function resolveMode(env: JourneyEnv, opts?: JourneyOptions): JourneyMode {
   if (value.includes('v1_files') || value.includes('v1-files')) return 'v1_files'
   if (value.includes('private_chat') || value.includes('private-chat')) return 'private_chat'
   if (value.includes('v2_user_chats') || value.includes('v2-user-chats')) return 'v2_user_chats'
+  if (value.includes('lifecycle') || value.includes('archive') || value.includes('soft_delete') || value.includes('soft-delete')) return 'lifecycle'
   if (value.includes('b2b') || value.includes('server')) return 'b2b'
   if (value.includes('advanced') || value.includes('comprehensive')) return 'advanced'
   return 'basic'
@@ -1088,6 +1093,7 @@ export async function runJourney(env: JourneyEnv, opts?: JourneyOptions): Promis
   if (mode === 'v1_files') return await runJourneyV1Files(env)
   if (mode === 'private_chat') return await runJourneyPrivateChat(env)
   if (mode === 'v2_user_chats') return await runJourneyV2UserChats(env)
+  if (mode === 'lifecycle') return await runJourneyAdvancedLifecycle(env)
 
   // Per-run user/chat uniqueness via suffix; the synthetic app uses a STABLE
   // displayName per mode so the backend's `__uptime__` analytics bypass fires.
@@ -2166,3 +2172,355 @@ async function runJourneyAdvanced(env: JourneyEnv, opts?: JourneyOptions): Promi
 }
 
 
+// ----------------------------------------------------------------------------
+// Lifecycle journey: soft delete -> restore -> export -> hard delete -> import
+// ----------------------------------------------------------------------------
+//
+// Manual/optional journey that exercises the full archive + restore + cascade
+// purge + bundle round-trip flow shipped on the 2607 line. This is the
+// regression-catcher for ethora-backend's soft-delete / hard-delete /
+// export-import promises: if any of the assertion points below fail, a
+// future change broke something documented in the API contract.
+//
+// Why a journey and not a unit test: these endpoints touch Mongo, ejabberd
+// (MUC create/destroy), and the Bull worker that drives the cascade purge.
+// Unit tests cover orchestration logic; this journey is the integration
+// guardrail that runs against a live QA / staging stack.
+//
+// Trigger: ETHORA_JOURNEY_MODE=lifecycle npm run journey  (CLI)
+//          POST /api/run-check with checkId: <instance>:journey_lifecycle (UI)
+//
+// Optional XMPP-side check: when ETHORA_XMPP_HOST + ETHORA_XMPP_ADMIN_PASS
+// are set, the journey also asks ejabberd directly whether the MUC room
+// exists at each lifecycle stage. Without those env vars it skips XMPP
+// queries and reports lifecycle correctness from Mongo-level signals only.
+async function runJourneyAdvancedLifecycle(env: JourneyEnv): Promise<JourneyResult> {
+  const suffix = randSuffix()
+  const appDisplayName = SYNTHETIC_APP_DISPLAY_NAME_LIFECYCLE
+  const probeEmail = `__uptime__lifecycle-${suffix}@${env.baseDomainName}`
+  const probePass = `Lf-${suffix}-${randSuffix()}!`
+
+  const details: Record<string, any> = {
+    suffix,
+    appDisplayName,
+    probeEmail,
+    mode: 'lifecycle',
+    steps: [],
+    cleanup: { errors: [] as Array<{ stage: string; message: string }> },
+  }
+  const step = (name: string, extra?: any) => details.steps.push({ name, ...extra, ts: new Date().toISOString() })
+  const cleanupErr = (stage: string, e: any) => {
+    details.cleanup.errors.push({ stage, message: e?.message || String(e) })
+  }
+
+  let ownerUserToken: string | null = null
+  let baseAppToken: string | null = null
+  // First-pass app (created, archived/restored/exported, then hard-deleted).
+  let appId: string | null = null
+  // Second-pass app (created via bundle import).
+  let importedAppId: string | null = null
+
+  // Optional XMPP-side checker. Returns null when env vars aren't set so
+  // callers can ignore (Mongo-level checks still run). When set, returns
+  // true if ejabberd reports the room exists.
+  const xmppHost = (process.env.ETHORA_XMPP_HOST || '').trim()
+  const xmppAdminPass = (process.env.ETHORA_XMPP_ADMIN_PASS || '').trim()
+  const xmppEnabled = !!(xmppHost && xmppAdminPass)
+  async function roomExistsOnXmpp(roomName: string): Promise<boolean | null> {
+    if (!xmppEnabled) return null
+    // ejabberd's HTTP API requires admin@<host> Basic auth + JSON body.
+    const auth = Buffer.from(`admin@${xmppHost}:${xmppAdminPass}`).toString('base64')
+    const url = `http://127.0.0.1:5280/api/get_room_options`
+    try {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Basic ${auth}` },
+        body: JSON.stringify({ name: roomName, service: `conference.${xmppHost}` }),
+      })
+      const text = await resp.text()
+      // Existing rooms return a populated JSON map; gone rooms return {} or an error string.
+      try {
+        const parsed = JSON.parse(text)
+        return Object.keys(parsed || {}).length > 0
+      } catch {
+        return false
+      }
+    } catch {
+      // Network failure shouldn't fail the whole journey - report unknown.
+      return null
+    }
+  }
+
+  try {
+    step('get_base_app_config')
+    const cfgResp = await httpJson(
+      'GET',
+      `${env.ethoraApiBase}/v1/apps/get-config?domainName=${encodeURIComponent(env.baseDomainName)}`,
+      {}
+    )
+    if (!cfgResp.resp.ok) throw new Error(`get-config failed: ${cfgResp.resp.status} ${cfgResp.text}`)
+    baseAppToken =
+      cfgResp.json?.appToken ||
+      cfgResp.json?.app?.appToken ||
+      cfgResp.json?.result?.appToken ||
+      cfgResp.json?.result?.app?.appToken
+    if (!baseAppToken) throw new Error('get-config: missing appToken')
+
+    step('login_admin')
+    const loginResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v1/users/login-with-email`,
+      { Authorization: String(baseAppToken) },
+      { email: env.adminEmail, password: env.adminPassword }
+    )
+    if (!loginResp.resp.ok) throw new Error(`login failed: ${loginResp.resp.status} ${loginResp.text}`)
+    ownerUserToken = loginResp.json?.token
+    if (!ownerUserToken) throw new Error('login: missing token')
+
+    // Orphan-sweep: a previous failed run could have left the lifecycle app
+    // in any state (active, archived, deleting). Clean up every variant
+    // before creating fresh. Uses ?includeArchived=true to see archived rows
+    // and ?mode=hard so the cleanup itself doesn't leave another orphan.
+    step('cleanup_orphans_start')
+    let orphansCleaned = 0
+    {
+      const list = await httpJson(
+        'GET',
+        `${env.ethoraApiBase}/v1/apps?limit=200&includeArchived=true&orderBy=createdAt&order=desc`,
+        { Authorization: `Bearer ${ownerUserToken}` }
+      )
+      const apps = Array.isArray(list.json?.apps) ? list.json.apps : []
+      for (const a of apps) {
+        if (String(a?.displayName || '') !== appDisplayName) continue
+        const oid = String(a?._id || '').trim()
+        if (!oid) continue
+        try {
+          await httpJson(
+            'DELETE',
+            `${env.ethoraApiBase}/v1/apps/${encodeURIComponent(oid)}?mode=hard`,
+            { Authorization: `Bearer ${ownerUserToken}` }
+          )
+          orphansCleaned += 1
+        } catch { /* best-effort */ }
+      }
+    }
+    details.orphansCleaned = orphansCleaned
+    if (orphansCleaned > 0) step('cleaned_orphans', { count: orphansCleaned })
+
+    // === CREATE: app + probe user, baseline login ===
+    step('create_app')
+    const createResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v1/apps`,
+      { Authorization: `Bearer ${ownerUserToken}`, ...SYNTHETIC_HEADERS },
+      { displayName: appDisplayName, createDefaultChat: true }
+    )
+    if (!createResp.resp.ok) throw new Error(`create app failed: ${createResp.resp.status} ${createResp.text}`)
+    const appObj = createResp.json?.app || createResp.json?.result?.app || createResp.json?.result || createResp.json
+    appId = String(appObj?._id || appObj?.id || '').trim()
+    if (!appId) throw new Error('create app: missing _id')
+    details.appId = appId
+
+    step('signup_probe_user', { email: probeEmail })
+    const signupResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v2/users/sign-up-with-email`,
+      { 'Content-Type': 'application/json', 'x-app-id': appId },
+      { email: probeEmail, password: probePass, firstName: 'Lifecycle', lastName: 'Probe' }
+    )
+    if (!signupResp.resp.ok) throw new Error(`signup failed: ${signupResp.resp.status} ${signupResp.text}`)
+
+    step('login_baseline')
+    let r = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v2/users/login-with-email`,
+      { 'Content-Type': 'application/json', 'x-app-id': appId },
+      { email: probeEmail, password: probePass }
+    )
+    if (!r.resp.ok || !r.json?.success) {
+      throw new Error(`baseline login failed: ${r.resp.status} ${r.text}`)
+    }
+
+    // === SOFT DELETE ===
+    step('soft_archive')
+    r = await httpJson('DELETE', `${env.ethoraApiBase}/v1/apps/${encodeURIComponent(appId)}`, { Authorization: `Bearer ${ownerUserToken}` })
+    if (!r.resp.ok || r.json?.status !== 'archived') {
+      throw new Error(`archive failed: ${r.resp.status} ${r.text}`)
+    }
+
+    step('login_refused_app_archived')
+    r = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v2/users/login-with-email`,
+      { 'Content-Type': 'application/json', 'x-app-id': appId },
+      { email: probeEmail, password: probePass }
+    )
+    if (r.json?.code !== 'APP_ARCHIVED') {
+      throw new Error(`expected APP_ARCHIVED, got: ${r.json?.code || r.resp.status}`)
+    }
+
+    step('app_hidden_from_default_list')
+    r = await httpJson('GET', `${env.ethoraApiBase}/v1/apps?limit=200&orderBy=createdAt&order=desc`, { Authorization: `Bearer ${ownerUserToken}` })
+    const activeIds = (Array.isArray(r.json?.apps) ? r.json.apps : []).map((a: any) => String(a?._id || ''))
+    if (activeIds.includes(appId)) throw new Error('archived app should not appear in default list')
+
+    step('app_visible_in_archived_list')
+    r = await httpJson('GET', `${env.ethoraApiBase}/v1/apps?limit=200&status=archived&orderBy=createdAt&order=desc`, { Authorization: `Bearer ${ownerUserToken}` })
+    const archivedIds = (Array.isArray(r.json?.apps) ? r.json.apps : []).map((a: any) => String(a?._id || ''))
+    if (!archivedIds.includes(appId)) throw new Error('archived app should appear in ?status=archived list')
+
+    // === RESTORE ===
+    step('restore')
+    r = await httpJson('POST', `${env.ethoraApiBase}/v1/apps/${encodeURIComponent(appId)}/restore`, { Authorization: `Bearer ${ownerUserToken}` })
+    if (!r.resp.ok || r.json?.status !== 'active') {
+      throw new Error(`restore failed: ${r.resp.status} ${r.text}`)
+    }
+
+    step('login_after_restore')
+    r = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v2/users/login-with-email`,
+      { 'Content-Type': 'application/json', 'x-app-id': appId },
+      { email: probeEmail, password: probePass }
+    )
+    if (!r.resp.ok || !r.json?.success) {
+      throw new Error(`post-restore login failed: ${r.resp.status} ${r.text}`)
+    }
+
+    // === EXPORT (include=users so the bundle round-trips the probe user) ===
+    step('export_bundle')
+    const exportResp = await fetch(
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(appId)}/export?format=json&include=users,chats`,
+      { headers: { Authorization: `Bearer ${ownerUserToken}` } }
+    )
+    if (!exportResp.ok) throw new Error(`export failed: ${exportResp.status} ${await exportResp.text()}`)
+    const bundle: any = await exportResp.json()
+    if (bundle?.schemaVersion !== 'ethora.app.bundle.v1') {
+      throw new Error(`unexpected schemaVersion: ${bundle?.schemaVersion}`)
+    }
+    if (!Array.isArray(bundle?.users) || bundle.users.length < 1) {
+      throw new Error('bundle missing users (include=users requested)')
+    }
+    const exportedUser = bundle.users[0]
+    if (!exportedUser?.password) {
+      throw new Error('bundle user missing password hash - export side regressed')
+    }
+    details.bundleUsers = bundle.users.length
+    details.bundleMemberships = bundle.memberships?.length || 0
+    details.bundleChats = bundle.chats?.length || 0
+
+    // Optional XMPP-side check: confirm the default Main chat MUC exists before purge.
+    const firstChatName = String(bundle.chats?.[0]?.name || '')
+    if (firstChatName) {
+      const exists = await roomExistsOnXmpp(firstChatName)
+      if (exists !== null) {
+        step('xmpp_room_exists_before_purge', { roomName: firstChatName, exists })
+        if (!exists) throw new Error(`xmpp room missing before purge: ${firstChatName}`)
+      }
+    }
+
+    // === HARD DELETE + poll ===
+    step('hard_delete')
+    r = await httpJson('DELETE', `${env.ethoraApiBase}/v1/apps/${encodeURIComponent(appId)}?mode=hard`, { Authorization: `Bearer ${ownerUserToken}` })
+    if (r.resp.status !== 202 || !r.json?.jobId) {
+      throw new Error(`hard delete didn't enqueue: ${r.resp.status} ${r.text}`)
+    }
+    const jobId = String(r.json.jobId)
+    details.purgeJobId = jobId
+
+    step('poll_purge_until_complete')
+    const purgeStartedAt = Date.now()
+    let purgeFinal: any = null
+    while (Date.now() - purgeStartedAt < 90000) {
+      const poll = await httpJson('GET', `${env.ethoraApiBase}/v2/apps/purge-jobs/${encodeURIComponent(jobId)}`, { Authorization: `Bearer ${ownerUserToken}` })
+      const state = String(poll.json?.state || '')
+      if (state === 'completed') { purgeFinal = poll.json; break }
+      if (state === 'failed') throw new Error(`purge failed: ${poll.json?.error || poll.text}`)
+      await new Promise((res) => setTimeout(res, 2000))
+    }
+    if (!purgeFinal) throw new Error('purge poll timed out (90s)')
+    details.purgeSummary = purgeFinal?.result?.summary || null
+
+    // Optional XMPP-side check: room should be gone now.
+    if (firstChatName) {
+      const exists = await roomExistsOnXmpp(firstChatName)
+      if (exists !== null) {
+        step('xmpp_room_gone_after_purge', { roomName: firstChatName, exists })
+        if (exists) throw new Error(`xmpp room still present after purge: ${firstChatName}`)
+      }
+    }
+
+    step('login_refused_app_gone')
+    r = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v2/users/login-with-email`,
+      { 'Content-Type': 'application/json', 'x-app-id': appId },
+      { email: probeEmail, password: probePass }
+    )
+    // After hard delete the app row is gone. login_with_email refuses
+    // with APP_NOT_FOUND (or AUTH_FAILED depending on how resolveAppContext
+    // surfaces the missing app); we just need to assert it's NOT a successful
+    // login and NOT the soft-delete code.
+    if (r.json?.success === true) throw new Error('login succeeded after hard delete')
+    if (r.json?.code === 'APP_ARCHIVED') throw new Error('hard delete left app in archived state, not gone')
+
+    // === IMPORT ===
+    step('import_bundle')
+    const importResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v2/apps/import`,
+      { Authorization: `Bearer ${ownerUserToken}`, 'Content-Type': 'application/json' },
+      bundle
+    )
+    if (importResp.resp.status !== 201) {
+      throw new Error(`import failed: ${importResp.resp.status} ${importResp.text}`)
+    }
+    const importSummary = importResp.json?.summary || {}
+    importedAppId = String(importSummary.newAppId || '').trim()
+    if (!importedAppId) throw new Error('import: missing newAppId')
+    if ((importSummary.users || 0) < 1) throw new Error('import: users count is zero')
+    details.importedAppId = importedAppId
+    details.importSummary = importSummary
+
+    // Optional XMPP-side check: room re-created under new appId prefix?
+    const importedFirstChatName = `${importedAppId}_${firstChatName.split('_').slice(1).join('_')}`
+    if (importedFirstChatName && firstChatName) {
+      const exists = await roomExistsOnXmpp(importedFirstChatName)
+      if (exists !== null) {
+        step('xmpp_room_recreated_after_import', { roomName: importedFirstChatName, exists })
+        if (!exists) throw new Error(`xmpp room not recreated after import: ${importedFirstChatName}`)
+      }
+    }
+
+    step('login_after_import')
+    r = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v2/users/login-with-email`,
+      { 'Content-Type': 'application/json', 'x-app-id': importedAppId },
+      { email: probeEmail, password: probePass }
+    )
+    if (!r.resp.ok || !r.json?.success) {
+      throw new Error(`post-import login failed (round-trip regression): ${r.resp.status} ${r.text}`)
+    }
+
+    step('all_checks_passed')
+    return { ok: true, details }
+  } catch (e: any) {
+    details.error = e?.message || String(e)
+    return { ok: false, details }
+  } finally {
+    // Hard-delete cleanup of both apps the journey created. Best-effort -
+    // a leftover here just means the orphan sweep at the top of the next run
+    // will mop it up.
+    for (const id of [importedAppId, appId]) {
+      if (!id || !ownerUserToken) continue
+      try {
+        await httpJson(
+          'DELETE',
+          `${env.ethoraApiBase}/v1/apps/${encodeURIComponent(id)}?mode=hard`,
+          { Authorization: `Bearer ${ownerUserToken}` }
+        )
+      } catch (e) { cleanupErr('delete_app', e) }
+    }
+  }
+}

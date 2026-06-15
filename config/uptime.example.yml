@@ -69,4 +69,14 @@ instances:
         intervalSeconds: 7200
         timeoutMs: 240000
 
+      # Optional: app lifecycle journey (soft-delete + restore, hard-delete cascade, export/import round-trip).
+      # Manual-trigger only by default (intervalSeconds: 0) - this journey creates and destroys an app.
+      - id: journey_lifecycle
+        name: Synthetic_journey_lifecycle
+        type: journey
+        severity: optional
+        enabled: false
+        intervalSeconds: 0
+        timeoutMs: 240000
+
 
