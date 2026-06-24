@@ -84,6 +84,23 @@ export interface LoadRunResult {
    errorBreakdown: Array<{ error: string; count: number }>
 }
 
+// Journeys signal failure two ways: by throwing (caught below) or by returning
+// `{ ok: false, details }` with the cause buried in `details`. Pull out a
+// human-meaningful error string so the load summary's errorBreakdown is useful
+// instead of a wall of "unknown".
+function extractJourneyError(details: Record<string, any> | undefined): string {
+   if (!details || typeof details !== 'object') return 'journey failed (no details)'
+   if (typeof details.error === 'string' && details.error) return details.error
+   const steps = Array.isArray(details.steps) ? details.steps : []
+   for (let i = steps.length - 1; i >= 0; i--) {
+      const s = steps[i]
+      if (s && (s.name === 'error' || s.error || s.message)) {
+         return String(s.error || s.message || s.name)
+      }
+   }
+   return 'journey returned ok=false'
+}
+
 function percentile(sortedAsc: number[], q: number): number {
    if (!sortedAsc.length) return 0
    const idx = Math.min(sortedAsc.length - 1, Math.floor(sortedAsc.length * q))
@@ -187,7 +204,11 @@ export async function runLoad(opts: LoadRunOptions): Promise<LoadRunResult> {
          let outcome: { ok: boolean; details?: any; error?: string }
          try {
             const r = await work(workerId, iteration)
-            outcome = { ok: r.ok, details: r.details }
+            outcome = {
+               ok: r.ok,
+               details: r.details,
+               error: r.ok ? undefined : extractJourneyError(r.details),
+            }
          } catch (e: any) {
             outcome = { ok: false, error: e?.message || String(e) }
          } finally {
