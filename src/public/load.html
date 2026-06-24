@@ -174,10 +174,11 @@
           if (d.missing && d.missing.length) {
             banner.className = 'banner warn'
             banner.textContent = '⚠ Missing required env: ' + d.missing.join(', ') + ' — load runs will fail to start.'
+            banner.style.display = ''
             $('runBtn').disabled = true
           } else {
-            banner.className = 'banner ok'
-            banner.textContent = '✓ Target: ' + (d.apiBase || 'unknown') + '  ·  env present: ' + (d.present || []).join(', ')
+            // Env OK — keep the UI clean, no banner.
+            banner.style.display = 'none'
           }
         } catch (e) {
           $('envBanner').className = 'banner warn'
