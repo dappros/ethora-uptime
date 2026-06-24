@@ -1,0 +1,339 @@
+<!doctype html>
+<!-- Ethora.com platform, copyright: Dappros Ltd (c) 2026, all rights reserved -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ethora Load Testing</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%23f0b429'/%3E%3C/svg%3E" />
+    <style>
+      :root {
+        --bg: #0f1115;
+        --card: #161a21;
+        --card-border: #262b35;
+        --text: #e6edf3;
+        --muted: #8b95a6;
+        --link: #79c0ff;
+        --green: #2ea043;
+        --amber: #d29922;
+        --red: #f85149;
+        --gray: #6e7681;
+        --accent: #58a6ff;
+        --accent-bg: rgba(88,166,255,0.1);
+        --shadow: 0 4px 14px rgba(0,0,0,0.35);
+        color-scheme: dark;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; background: var(--bg); color: var(--text); font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial; }
+      body { padding: 16px; max-width: 1100px; margin: 0 auto; }
+      a { color: var(--link); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+      h1 { font-size: 20px; margin: 0 0 4px; }
+      h2 { font-size: 15px; margin: 0 0 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+      .header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 16px; }
+      .card { background: var(--card); border: 1px solid var(--card-border); border-radius: 10px; padding: 16px; box-shadow: var(--shadow); margin-bottom: 16px; }
+      label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+      input, select { width: 100%; padding: 8px 10px; background: var(--bg); color: var(--text); border: 1px solid var(--card-border); border-radius: 6px; font-size: 14px; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+      .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+      button { padding: 9px 18px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent-bg); color: var(--accent); font-size: 14px; font-weight: 600; cursor: pointer; }
+      button:disabled { opacity: 0.45; cursor: not-allowed; }
+      button.danger { border-color: var(--red); color: var(--red); background: rgba(248,81,73,0.08); }
+      .banner { padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 16px; }
+      .banner.ok { background: rgba(46,160,67,0.12); border: 1px solid rgba(46,160,67,0.4); }
+      .banner.warn { background: rgba(210,153,34,0.12); border: 1px solid rgba(210,153,34,0.4); color: var(--amber); }
+      .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+      .metric { background: var(--bg); border: 1px solid var(--card-border); border-radius: 8px; padding: 10px 12px; }
+      .metric .v { font-size: 22px; font-weight: 700; }
+      .metric .l { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+      .metric.green .v { color: var(--green); }
+      .metric.red .v { color: var(--red); }
+      .bar { height: 8px; border-radius: 4px; background: var(--red); overflow: hidden; margin-top: 8px; }
+      .bar > span { display: block; height: 100%; background: var(--green); }
+      table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--card-border); }
+      th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+      td.mono, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+      .pill.running { background: rgba(210,153,34,0.18); color: var(--amber); }
+      .pill.done { background: rgba(46,160,67,0.18); color: var(--green); }
+      .pill.error { background: rgba(248,81,73,0.18); color: var(--red); }
+      .muted { color: var(--muted); }
+      .hidden { display: none; }
+      .err-text { color: var(--red); font-family: ui-monospace, monospace; font-size: 12px; }
+      .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--muted); border-top-color: var(--amber); border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: middle; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <div>
+        <h1>⚡ Ethora Load Testing</h1>
+        <div class="muted" style="font-size:13px">Drive N parallel journeys against a deployment and measure throughput / latency / errors.</div>
+      </div>
+      <div><a href="/">← Uptime dashboard</a></div>
+    </div>
+
+    <div id="envBanner" class="banner">Checking environment…</div>
+
+    <div class="card">
+      <h2>Configure run</h2>
+      <div class="grid" style="margin-bottom:12px">
+        <div>
+          <label>Scenario</label>
+          <select id="scenario">
+            <option value="journey">journey (single mode)</option>
+            <option value="mixed-realistic">mixed-realistic (weighted mix)</option>
+          </select>
+        </div>
+        <div id="modeWrap">
+          <label>Journey mode</label>
+          <select id="mode"></select>
+        </div>
+        <div>
+          <label>Parallelism (max 500)</label>
+          <input id="parallelism" type="number" value="10" min="1" max="500" />
+        </div>
+        <div>
+          <label>Duration sec (max 3600)</label>
+          <input id="duration" type="number" value="60" min="1" max="3600" />
+        </div>
+        <div>
+          <label>Ramp-up sec</label>
+          <input id="rampUp" type="number" value="0" min="0" />
+        </div>
+        <div>
+          <label>Sleep between iters (ms)</label>
+          <input id="sleepMs" type="number" value="0" min="0" />
+        </div>
+        <div>
+          <label>Label (optional)</label>
+          <input id="label" type="text" placeholder="auto" />
+        </div>
+      </div>
+      <div class="row">
+        <button id="runBtn">Run load test</button>
+        <span id="runHint" class="muted" style="font-size:12px"></span>
+      </div>
+    </div>
+
+    <div id="liveCard" class="card hidden">
+      <h2><span class="spinner"></span> &nbsp;Live progress <span id="liveLabel" class="mono muted"></span></h2>
+      <div class="metrics">
+        <div class="metric"><div class="v" id="lvElapsed">0s</div><div class="l">Elapsed</div></div>
+        <div class="metric"><div class="v" id="lvIters">0</div><div class="l">Iterations</div></div>
+        <div class="metric green"><div class="v" id="lvOk">0</div><div class="l">OK</div></div>
+        <div class="metric red"><div class="v" id="lvFailed">0</div><div class="l">Failed</div></div>
+        <div class="metric"><div class="v" id="lvInflight">0</div><div class="l">In flight</div></div>
+        <div class="metric"><div class="v" id="lvRps">0</div><div class="l">Iters/sec</div></div>
+      </div>
+      <div class="bar"><span id="lvBar" style="width:0%"></span></div>
+    </div>
+
+    <div id="resultCard" class="card hidden">
+      <h2>Result <span id="resStatus"></span></h2>
+      <div class="metrics" style="margin-bottom:14px">
+        <div class="metric"><div class="v" id="rTotal">–</div><div class="l">Total</div></div>
+        <div class="metric green"><div class="v" id="rOk">–</div><div class="l">OK</div></div>
+        <div class="metric red"><div class="v" id="rFailed">–</div><div class="l">Failed</div></div>
+        <div class="metric"><div class="v" id="rSuccess">–</div><div class="l">Success rate</div></div>
+        <div class="metric"><div class="v" id="rRps">–</div><div class="l">Iters/sec</div></div>
+        <div class="metric"><div class="v" id="rP50">–</div><div class="l">p50 ms</div></div>
+        <div class="metric"><div class="v" id="rP95">–</div><div class="l">p95 ms</div></div>
+        <div class="metric"><div class="v" id="rP99">–</div><div class="l">p99 ms</div></div>
+        <div class="metric"><div class="v" id="rMax">–</div><div class="l">max ms</div></div>
+      </div>
+      <div id="errBox">
+        <h2>Error breakdown</h2>
+        <table id="errTable"><thead><tr><th>Error</th><th style="text-align:right">Count</th></tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Recent runs</h2>
+      <table id="histTable">
+        <thead><tr><th>Started</th><th>Label</th><th>Parallelism</th><th>Duration</th><th>Status</th><th style="text-align:right">OK / Total</th><th style="text-align:right">p95 ms</th></tr></thead>
+        <tbody><tr><td colspan="7" class="muted">No runs yet.</td></tr></tbody>
+      </table>
+    </div>
+
+    <script>
+      const $ = (id) => document.getElementById(id)
+      let pollTimer = null
+      let activeRunId = null
+
+      function fmtPct(x) { return (x * 100).toFixed(1) + '%' }
+      function fmtTime(iso) { try { return new Date(iso).toLocaleTimeString() } catch { return iso || '–' } }
+
+      async function loadEnv() {
+        try {
+          const r = await fetch('/api/load/env'); const d = await r.json()
+          const modeSel = $('mode')
+          modeSel.innerHTML = (d.journeyModes || []).map(m => `<option value="${m}">${m}</option>`).join('')
+          const banner = $('envBanner')
+          if (d.missing && d.missing.length) {
+            banner.className = 'banner warn'
+            banner.textContent = '⚠ Missing required env: ' + d.missing.join(', ') + ' — load runs will fail to start.'
+            $('runBtn').disabled = true
+          } else {
+            banner.className = 'banner ok'
+            banner.textContent = '✓ Target: ' + (d.apiBase || 'unknown') + '  ·  env present: ' + (d.present || []).join(', ')
+          }
+        } catch (e) {
+          $('envBanner').className = 'banner warn'
+          $('envBanner').textContent = 'Failed to read env status: ' + e
+        }
+      }
+
+      function toggleMode() {
+        $('modeWrap').style.display = $('scenario').value === 'journey' ? '' : 'none'
+      }
+
+      function renderLive(run) {
+        $('liveCard').classList.remove('hidden')
+        $('liveLabel').textContent = run.params.label || (run.params.scenario === 'journey' ? 'journey:' + run.params.mode : 'mixed-realistic')
+        const p = run.progress || {}
+        $('lvElapsed').textContent = (p.elapsedSeconds || 0) + 's'
+        $('lvIters').textContent = p.totalIterations || 0
+        $('lvOk').textContent = p.ok || 0
+        $('lvFailed').textContent = p.failed || 0
+        $('lvInflight').textContent = p.inFlight || 0
+        const rps = p.elapsedSeconds ? Math.round((p.totalIterations || 0) / p.elapsedSeconds) : 0
+        $('lvRps').textContent = rps
+        const done = p.totalIterations || 0
+        const okPct = done ? (p.ok / done) * 100 : 0
+        $('lvBar').style.width = okPct + '%'
+        // duration progress could also drive a bar; keep success-rate bar for now.
+      }
+
+      function renderResult(run) {
+        $('resultCard').classList.remove('hidden')
+        const st = $('resStatus')
+        st.className = 'pill ' + run.status
+        st.textContent = run.status
+        if (run.status === 'error') {
+          $('rTotal').textContent = '–'
+          document.querySelector('#errBox h2').textContent = 'Error'
+          const tb = $('errTable').querySelector('tbody')
+          tb.innerHTML = `<tr><td colspan="2" class="err-text">${run.error || 'unknown error'}</td></tr>`
+          return
+        }
+        const r = run.result; if (!r) return
+        $('rTotal').textContent = r.totalIterations
+        $('rOk').textContent = r.ok
+        $('rFailed').textContent = r.failed
+        $('rSuccess').textContent = fmtPct(r.successRate)
+        $('rRps').textContent = r.throughputPerSec.toFixed(1)
+        $('rP50').textContent = r.latency.p50Ms
+        $('rP95').textContent = r.latency.p95Ms
+        $('rP99').textContent = r.latency.p99Ms
+        $('rMax').textContent = r.latency.maxMs
+        document.querySelector('#errBox h2').textContent = 'Error breakdown'
+        const tb = $('errTable').querySelector('tbody')
+        if (!r.errorBreakdown || !r.errorBreakdown.length) {
+          tb.innerHTML = `<tr><td colspan="2" class="muted">No errors 🎉</td></tr>`
+        } else {
+          tb.innerHTML = r.errorBreakdown.map(e =>
+            `<tr><td class="err-text">${escapeHtml(e.error)}</td><td style="text-align:right" class="mono">${e.count}</td></tr>`
+          ).join('')
+        }
+      }
+
+      function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])) }
+
+      async function poll() {
+        if (!activeRunId) return
+        try {
+          const r = await fetch('/api/load/status?runId=' + encodeURIComponent(activeRunId))
+          if (!r.ok) return
+          const { run } = await r.json()
+          renderLive(run)
+          if (run.status !== 'running') {
+            clearInterval(pollTimer); pollTimer = null
+            $('liveCard').classList.add('hidden')
+            renderResult(run)
+            $('runBtn').disabled = false
+            $('runHint').textContent = ''
+            activeRunId = null
+            loadHistory()
+          }
+        } catch (e) { /* keep polling */ }
+      }
+
+      async function startRun() {
+        $('runBtn').disabled = true
+        $('runHint').innerHTML = '<span class="spinner"></span> starting…'
+        $('resultCard').classList.add('hidden')
+        const body = {
+          scenario: $('scenario').value,
+          mode: $('mode').value,
+          parallelism: Number($('parallelism').value),
+          durationSeconds: Number($('duration').value),
+          rampUpSeconds: Number($('rampUp').value),
+          sleepBetweenIterationsMs: Number($('sleepMs').value),
+          label: $('label').value,
+        }
+        try {
+          const r = await fetch('/api/load/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) })
+          const d = await r.json()
+          if (!r.ok) {
+            $('runHint').innerHTML = '<span class="err-text">' + escapeHtml(d.error || 'failed to start') + '</span>'
+            $('runBtn').disabled = false
+            return
+          }
+          activeRunId = d.runId
+          $('runHint').textContent = 'running… (' + d.runId + ')'
+          renderLive(d.run)
+          pollTimer = setInterval(poll, 1000)
+        } catch (e) {
+          $('runHint').innerHTML = '<span class="err-text">' + escapeHtml(String(e)) + '</span>'
+          $('runBtn').disabled = false
+        }
+      }
+
+      async function loadHistory() {
+        try {
+          const r = await fetch('/api/load/list'); const d = await r.json()
+          const tb = $('histTable').querySelector('tbody')
+          const runs = (d.runs || []).filter(x => x.status !== 'running')
+          if (!runs.length) { tb.innerHTML = `<tr><td colspan="7" class="muted">No runs yet.</td></tr>`; return }
+          tb.innerHTML = runs.map(run => {
+            const lbl = run.params.label || (run.params.scenario === 'journey' ? 'journey:' + run.params.mode : 'mixed-realistic')
+            const okTotal = run.result ? `${run.result.ok} / ${run.result.totalIterations}` : '–'
+            const p95 = run.result ? run.result.latency.p95Ms : '–'
+            return `<tr>
+              <td>${fmtTime(run.startedAt)}</td>
+              <td class="mono">${escapeHtml(lbl)}</td>
+              <td class="mono">${run.params.parallelism}</td>
+              <td class="mono">${run.params.durationSeconds}s</td>
+              <td><span class="pill ${run.status}">${run.status}</span></td>
+              <td style="text-align:right" class="mono">${okTotal}</td>
+              <td style="text-align:right" class="mono">${p95}</td>
+            </tr>`
+          }).join('')
+        } catch (e) { /* ignore */ }
+      }
+
+      // If a run is already active (e.g. page reload mid-run), resume polling.
+      async function resumeIfActive() {
+        try {
+          const r = await fetch('/api/load/list'); const d = await r.json()
+          const active = (d.runs || []).find(x => x.status === 'running')
+          if (active) {
+            activeRunId = active.id
+            $('runBtn').disabled = true
+            $('runHint').textContent = 'running… (' + active.id + ')'
+            renderLive(active)
+            pollTimer = setInterval(poll, 1000)
+          }
+        } catch (e) { /* ignore */ }
+      }
+
+      $('scenario').addEventListener('change', toggleMode)
+      $('runBtn').addEventListener('click', startRun)
+      loadEnv().then(toggleMode)
+      loadHistory()
+      resumeIfActive()
+    </script>
+  </body>
+</html>

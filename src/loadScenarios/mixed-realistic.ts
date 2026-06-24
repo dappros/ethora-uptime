@@ -15,14 +15,16 @@
 // generate, so the breakpoint we find is representative of real-world load.
 
 import { runJourney, getJourneyEnvFromProcess } from '../journeyRunner.js'
-import { runLoad, type LoadRunResult } from '../loadRunner.js'
+import { runLoad, type LoadRunResult, type LoadProgressSnapshot } from '../loadRunner.js'
 
 export interface MixedRealisticOptions {
    parallelism: number
    durationSeconds: number
    rampUpSeconds?: number
    sleepBetweenIterationsMs?: number
+   reportEverySeconds?: number
    label?: string
+   onProgress?: (snapshot: LoadProgressSnapshot) => void
 }
 
 const DEFAULT_DISTRIBUTION: Array<{ mode: string; weight: number }> = [
@@ -54,6 +56,8 @@ export async function runMixedRealistic(
       durationSeconds: opts.durationSeconds,
       rampUpSeconds: opts.rampUpSeconds,
       sleepBetweenIterationsMs: opts.sleepBetweenIterationsMs,
+      reportEverySeconds: opts.reportEverySeconds,
+      onProgress: opts.onProgress,
       label: opts.label || 'mixed-realistic',
       workerFn: async () => {
          const mode = pickMode()

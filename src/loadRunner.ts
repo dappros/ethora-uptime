@@ -48,6 +48,21 @@ export interface LoadRunOptions {
    reportEverySeconds?: number
    /** Friendly label for log lines. */
    label?: string
+
+   /**
+    * Live progress callback, invoked on the same cadence as the console
+    * reporter (reportEverySeconds). Used by the web UI to poll a snapshot of
+    * an in-flight run without waiting for the final summary.
+    */
+   onProgress?: (snapshot: LoadProgressSnapshot) => void
+}
+
+export interface LoadProgressSnapshot {
+   elapsedSeconds: number
+   totalIterations: number
+   ok: number
+   failed: number
+   inFlight: number
 }
 
 export interface IterationResult {
@@ -186,6 +201,19 @@ export async function runLoad(opts: LoadRunOptions): Promise<LoadRunResult> {
          console.log(
             `[load:${label}] t=${elapsedSec}s iters=${allResults.length} ok=${ok} failed=${failed} inFlight=${inFlight}`,
          )
+         if (opts.onProgress) {
+            try {
+               opts.onProgress({
+                  elapsedSeconds: elapsedSec,
+                  totalIterations: allResults.length,
+                  ok,
+                  failed,
+                  inFlight,
+               })
+            } catch {
+               // progress callback must never break the run
+            }
+         }
       }, reportEverySeconds * 1000)
    }
 
