@@ -51,7 +51,7 @@ export const SYNTHETIC_APP_DISPLAY_NAME_V2_USER_CHATS = '__uptime__journey_v2_us
 export const SYNTHETIC_APP_DISPLAY_NAME_LIFECYCLE = '__uptime__journey_lifecycle'
 
 // Stable header so a server admin can also distinguish these calls in logs/proxy rules.
-const SYNTHETIC_HEADERS: Record<string, string> = { 'x-ethora-synthetic': '1' }
+export const SYNTHETIC_HEADERS: Record<string, string> = { 'x-ethora-synthetic': '1' }
 
 export type JourneyEnv = {
   ethoraApiBase: string
@@ -139,12 +139,12 @@ function getXmppEnvFromProcess(): XmppEnv {
   return { serviceUrl, host, mucService }
 }
 
-type B2BEnv = {
+export type B2BEnv = {
   appId: string
   appSecret: string
 }
 
-function getB2BEnvFromProcess(): B2BEnv {
+export function getB2BEnvFromProcess(): B2BEnv {
   const appId = process.env.ETHORA_B2B_APP_ID || process.env.ETHORA_CHAT_APP_ID
   const appSecret = process.env.ETHORA_B2B_APP_SECRET || process.env.ETHORA_CHAT_APP_SECRET
   return {
@@ -179,7 +179,7 @@ function randSuffix() {
   return crypto.randomUUID().slice(0, 8)
 }
 
-async function httpJson(method: string, url: string, headers: Record<string, string>, body?: any) {
+export async function httpJson(method: string, url: string, headers: Record<string, string>, body?: any) {
   const resp = await fetch(url, {
     method,
     headers: {
@@ -206,7 +206,7 @@ function deriveScopedSecret(secret: string, purpose: string) {
   return crypto.createHmac('sha256', String(secret)).update(`ethora:${purpose}:v1`).digest('hex')
 }
 
-function createServerToken(appId: string, appSecret: string, tenantId?: string) {
+export function createServerToken(appId: string, appSecret: string, tenantId?: string) {
   const header = { alg: 'HS256', typ: 'JWT' }
   const payload: any = { data: { type: 'server', appId: String(appId) } }
   if (tenantId) payload.data.tenantId = String(tenantId)
@@ -222,7 +222,7 @@ function getResultObject(input: any) {
   return input?.result || input?.app || input
 }
 
-type SyntheticAppRef = {
+export type SyntheticAppRef = {
   appId: string
   appToken: string
   // Number of orphan apps from previous failed runs that were cleaned up before
@@ -340,7 +340,7 @@ async function deleteOrphansV2(
 }
 
 // V2 / B2B variant: orphan-sweep + create fresh child app under the parent tenant.
-async function prepareSyntheticAppV2(
+export async function prepareSyntheticAppV2(
   apiBase: string,
   parentServerToken: string,
   displayName: string
@@ -377,7 +377,7 @@ async function prepareSyntheticAppV2(
   return { appId: id, appToken: resolvedToken, orphansCleaned }
 }
 
-async function pollUserBatchJob(apiBase: string, appId: string, authToken: string, jobId: string, timeoutMs = 120000) {
+export async function pollUserBatchJob(apiBase: string, appId: string, authToken: string, jobId: string, timeoutMs = 120000) {
   const startedAt = Date.now()
   while (Date.now() - startedAt < timeoutMs) {
     const resp = await httpJson(
