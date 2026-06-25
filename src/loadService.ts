@@ -15,9 +15,10 @@
 import { getJourneyEnvFromProcess } from './journeyRunner.js'
 import { runLoad, type LoadRunResult, type LoadProgressSnapshot } from './loadRunner.js'
 import { runMixedRealistic } from './loadScenarios/mixed-realistic.js'
+import { runSharedApp } from './loadScenarios/shared-app.js'
 
 export interface LoadRunParams {
-   scenario: 'journey' | 'mixed-realistic'
+   scenario: 'journey' | 'mixed-realistic' | 'shared-app'
    mode?: string
    parallelism: number
    durationSeconds: number
@@ -133,7 +134,8 @@ export function startLoadRun(raw: LoadRunParams): LoadRunState {
       throw err
    }
 
-   const scenario: LoadRunParams['scenario'] = raw.scenario === 'mixed-realistic' ? 'mixed-realistic' : 'journey'
+   const scenario: LoadRunParams['scenario'] =
+      raw.scenario === 'mixed-realistic' ? 'mixed-realistic' : raw.scenario === 'shared-app' ? 'shared-app' : 'journey'
    // Guardrails: cap parallelism/duration so a fat-fingered UI value can't take
    // the box (or the target deployment) down by accident.
    const params: LoadRunParams = {
@@ -172,6 +174,16 @@ export function startLoadRun(raw: LoadRunParams): LoadRunState {
          let result: LoadRunResult
          if (params.scenario === 'mixed-realistic') {
             result = await runMixedRealistic({
+               parallelism: params.parallelism,
+               durationSeconds: params.durationSeconds,
+               rampUpSeconds: params.rampUpSeconds,
+               sleepBetweenIterationsMs: params.sleepBetweenIterationsMs,
+               reportEverySeconds: 2,
+               label: params.label,
+               onProgress,
+            })
+         } else if (params.scenario === 'shared-app') {
+            result = await runSharedApp({
                parallelism: params.parallelism,
                durationSeconds: params.durationSeconds,
                rampUpSeconds: params.rampUpSeconds,
