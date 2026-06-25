@@ -193,7 +193,7 @@
 
       function renderLive(run) {
         $('liveCard').classList.remove('hidden')
-        $('liveLabel').textContent = run.params.label || (run.params.scenario === 'journey' ? 'journey:' + run.params.mode : 'mixed-realistic')
+        $('liveLabel').textContent = run.params.label || (run.params.scenario === 'journey' ? 'journey:' + run.params.mode : run.params.scenario)
         const p = run.progress || {}
         $('lvElapsed').textContent = (p.elapsedSeconds || 0) + 's'
         $('lvIters').textContent = p.totalIterations || 0
@@ -300,7 +300,7 @@
           const runs = (d.runs || []).filter(x => x.status !== 'running')
           if (!runs.length) { tb.innerHTML = `<tr><td colspan="7" class="muted">No runs yet.</td></tr>`; return }
           tb.innerHTML = runs.map(run => {
-            const lbl = run.params.label || (run.params.scenario === 'journey' ? 'journey:' + run.params.mode : 'mixed-realistic')
+            const lbl = run.params.label || (run.params.scenario === 'journey' ? 'journey:' + run.params.mode : run.params.scenario)
             const okTotal = run.result ? `${run.result.ok} / ${run.result.totalIterations}` : '–'
             const p95 = run.result ? run.result.latency.p95Ms : '–'
             return `<tr>
