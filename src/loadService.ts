@@ -17,9 +17,10 @@ import { runLoad, type LoadRunResult, type LoadProgressSnapshot } from './loadRu
 import { runMixedRealistic } from './loadScenarios/mixed-realistic.js'
 import { runSharedApp } from './loadScenarios/shared-app.js'
 import { runSharedB2B } from './loadScenarios/shared-b2b.js'
+import { runFullB2B } from './loadScenarios/full-b2b.js'
 
 export interface LoadRunParams {
-   scenario: 'journey' | 'mixed-realistic' | 'shared-app' | 'shared-b2b'
+   scenario: 'journey' | 'mixed-realistic' | 'shared-app' | 'shared-b2b' | 'full-b2b'
    mode?: string
    parallelism: number
    durationSeconds: number
@@ -142,7 +143,9 @@ export function startLoadRun(raw: LoadRunParams): LoadRunState {
            ? 'shared-app'
            : raw.scenario === 'shared-b2b'
              ? 'shared-b2b'
-             : 'journey'
+             : raw.scenario === 'full-b2b'
+               ? 'full-b2b'
+               : 'journey'
    // Guardrails: cap parallelism/duration so a fat-fingered UI value can't take
    // the box (or the target deployment) down by accident.
    const params: LoadRunParams = {
@@ -201,6 +204,16 @@ export function startLoadRun(raw: LoadRunParams): LoadRunState {
             })
          } else if (params.scenario === 'shared-b2b') {
             result = await runSharedB2B({
+               parallelism: params.parallelism,
+               durationSeconds: params.durationSeconds,
+               rampUpSeconds: params.rampUpSeconds,
+               sleepBetweenIterationsMs: params.sleepBetweenIterationsMs,
+               reportEverySeconds: 2,
+               label: params.label,
+               onProgress,
+            })
+         } else if (params.scenario === 'full-b2b') {
+            result = await runFullB2B({
                parallelism: params.parallelism,
                durationSeconds: params.durationSeconds,
                rampUpSeconds: params.rampUpSeconds,
