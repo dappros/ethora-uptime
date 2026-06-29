@@ -285,7 +285,7 @@ async function deleteOrphansV1(
 // Sweep any orphan apps from previous failed runs (matching this stable displayName),
 // then create a fresh synthetic app. Always exercises POST /v1/apps so the synthetic
 // also doubles as a regression test for app creation.
-async function prepareSyntheticAppV1(
+export async function prepareSyntheticAppV1(
   apiBase: string,
   ownerToken: string,
   displayName: string
@@ -1673,7 +1673,7 @@ async function runJourneyB2B(env: JourneyEnv, opts?: JourneyOptions): Promise<Jo
   }
 }
 
-async function joinRoomByWs(
+export async function joinRoomByWs(
   serviceUrl: string,
   domain: string,
   usernameLocal: string,
