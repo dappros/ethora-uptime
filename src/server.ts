@@ -12,6 +12,7 @@ import {
   getRun as getLoadRun,
   listRuns as listLoadRuns,
   getEnvStatus as getLoadEnvStatus,
+  getMetricsText as getLoadMetricsText,
   JOURNEY_MODES,
 } from './loadService.js'
 
@@ -426,6 +427,12 @@ async function main() {
 
   app.get('/api/load/list', (_req, res) => {
     res.json({ runs: listLoadRuns() })
+  })
+
+  // Prometheus scrape target: load metrics (RPS / latency / errors / inflight)
+  // so Grafana can overlay them on cAdvisor/node_exporter resource graphs.
+  app.get('/metrics', (_req, res) => {
+    res.type('text/plain; version=0.0.4').send(getLoadMetricsText())
   })
 
   // Serve UI

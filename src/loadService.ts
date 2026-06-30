@@ -120,6 +120,46 @@ export function listRuns(): LoadRunState[] {
    return out
 }
 
+// Prometheus exposition for the current (or last finished) load run, so a
+// Grafana dashboard can overlay load (RPS / latency / errors / inflight) on the
+// same timeline as cAdvisor/node_exporter resource metrics. Live counts come
+// from the active run's progress; latency percentiles are only known once a run
+// finishes, so they reflect the most recent completed run.
+export function getMetricsText(): string {
+   const run = activeRun || history[0] || null
+   const running = activeRun ? 1 : 0
+   const p = run?.progress
+   const elapsed = p?.elapsedSeconds || 0
+   const ok = p?.ok || 0
+   const total = p?.totalIterations || 0
+   const failed = p?.failed || 0
+   const inflight = p?.inFlight || 0
+   const throughput = elapsed > 0 ? total / elapsed : (run?.result?.throughputPerSec || 0)
+   const lat = run?.result?.latency
+   const lines: string[] = []
+   const g = (name: string, help: string, value: number, labels = '') => {
+      lines.push(`# HELP ${name} ${help}`)
+      lines.push(`# TYPE ${name} gauge`)
+      lines.push(`${name}${labels} ${Number.isFinite(value) ? value : 0}`)
+   }
+   g('ethora_load_running', 'Whether a load run is currently active (1) or not (0).', running)
+   g('ethora_load_parallelism', 'Configured parallelism of the current/last run.', run?.params?.parallelism || 0)
+   g('ethora_load_inflight', 'Iterations currently in flight.', inflight)
+   g('ethora_load_iterations', 'Total iterations so far (current/last run).', total)
+   g('ethora_load_ok', 'Successful iterations.', ok)
+   g('ethora_load_failed', 'Failed iterations.', failed)
+   g('ethora_load_throughput_per_sec', 'Iterations per second.', Math.round(throughput * 100) / 100)
+   if (lat) {
+      lines.push('# HELP ethora_load_latency_ms Iteration latency percentiles (last finished run).')
+      lines.push('# TYPE ethora_load_latency_ms gauge')
+      lines.push(`ethora_load_latency_ms{quantile="0.5"} ${lat.p50Ms}`)
+      lines.push(`ethora_load_latency_ms{quantile="0.95"} ${lat.p95Ms}`)
+      lines.push(`ethora_load_latency_ms{quantile="0.99"} ${lat.p99Ms}`)
+      lines.push(`ethora_load_latency_ms{quantile="1.0"} ${lat.maxMs}`)
+   }
+   return lines.join('\n') + '\n'
+}
+
 function clampPositive(n: number, def: number, max: number): number {
    if (!Number.isFinite(n) || n <= 0) return def
    return Math.min(n, max)
