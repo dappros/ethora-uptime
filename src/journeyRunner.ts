@@ -49,6 +49,10 @@ export const SYNTHETIC_APP_DISPLAY_NAME_V2_USER_CHATS = '__uptime__journey_v2_us
 // Lifecycle (2607+): soft-delete -> restore -> export -> hard-delete -> import.
 // Verifies the full backup/restore promise including end-user round-trip.
 export const SYNTHETIC_APP_DISPLAY_NAME_LIFECYCLE = '__uptime__journey_lifecycle'
+// Opt-in AI journey (agents forward path). Only run where the AI module is
+// enabled at deploy-config level — kept out of the standard b2b journey so
+// AI-disabled deployments don't false-RED.
+export const SYNTHETIC_APP_DISPLAY_NAME_AI = '__uptime__journey_ai'
 
 // Stable header so a server admin can also distinguish these calls in logs/proxy rules.
 const SYNTHETIC_HEADERS: Record<string, string> = { 'x-ethora-synthetic': '1' }
@@ -79,6 +83,7 @@ type JourneyMode =
   | 'private_chat'
   | 'v2_user_chats'
   | 'lifecycle'
+  | 'ai'
 
 type JourneyOptions = {
   mode?: string
@@ -170,6 +175,7 @@ function resolveMode(env: JourneyEnv, opts?: JourneyOptions): JourneyMode {
   if (value.includes('private_chat') || value.includes('private-chat')) return 'private_chat'
   if (value.includes('v2_user_chats') || value.includes('v2-user-chats')) return 'v2_user_chats'
   if (value.includes('lifecycle') || value.includes('archive') || value.includes('soft_delete') || value.includes('soft-delete')) return 'lifecycle'
+  if (value.includes('journey_ai') || value.includes('journey-ai') || value.includes('ai_agents') || value.includes('ai-agents') || value === 'ai') return 'ai'
   if (value.includes('b2b') || value.includes('server')) return 'b2b'
   if (value.includes('advanced') || value.includes('comprehensive')) return 'advanced'
   return 'basic'
@@ -1094,6 +1100,7 @@ export async function runJourney(env: JourneyEnv, opts?: JourneyOptions): Promis
   if (mode === 'private_chat') return await runJourneyPrivateChat(env)
   if (mode === 'v2_user_chats') return await runJourneyV2UserChats(env)
   if (mode === 'lifecycle') return await runJourneyAdvancedLifecycle(env)
+  if (mode === 'ai') return await runJourneyAI(env)
 
   // Per-run user/chat uniqueness via suffix; the synthetic app uses a STABLE
   // displayName per mode so the backend's `__uptime__` analytics bypass fires.
@@ -1373,9 +1380,17 @@ async function runJourneyB2B(env: JourneyEnv): Promise<JourneyResult> {
     )
     if (!provisionResp.resp.ok) throw new Error(`provision rooms failed: ${provisionResp.resp.status} ${provisionResp.text}`)
 
-    // AI Bot read/write — best-effort: AI-bot service is optional and may be
-    // unavailable in some deployments. We exercise the API surface but treat
+    // Legacy AI Bot read/write — best-effort: AI-bot service is optional and may
+    // be unavailable in some deployments. We exercise the API surface but treat
     // 5xx specifically as a "skipped" so we don't false-RED the journey.
+    //
+    // Since the B2B-app default was inverted (apps created via the API no longer
+    // seed a "Main chat" room and therefore no longer auto-provision the legacy
+    // `aiBot`), a freshly-created B2B app has NO initialized legacy bot. GET /bot
+    // still returns 200 with `bot: null`, but PUT /bot legitimately returns 422
+    // BOT_NOT_INITIALIZED. The forward path for B2B AI is the Agents API,
+    // exercised in the next block — so here we only PUT when the legacy bot is
+    // actually initialized, and otherwise record a skip instead of false-RED.
     step('get_app_bot_v2')
     const getBotResp = await httpJson(
       'GET',
@@ -1383,21 +1398,33 @@ async function runJourneyB2B(env: JourneyEnv): Promise<JourneyResult> {
       { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS }
     )
     if (getBotResp.resp.ok) {
-      step('put_app_bot_v2')
-      const putBotResp = await httpJson(
-        'PUT',
-        `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/bot`,
-        { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS },
-        { status: 'off', greetingMessage: `uptime-${suffix}` }
-      )
-      if (!putBotResp.resp.ok && putBotResp.resp.status < 500) {
-        throw new Error(`put app bot failed: ${putBotResp.resp.status} ${putBotResp.text}`)
+      const legacyBotInitialized = Boolean(getBotResp.json?.bot?.userId)
+      if (legacyBotInitialized) {
+        step('put_app_bot_v2')
+        const putBotResp = await httpJson(
+          'PUT',
+          `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/bot`,
+          { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS },
+          { status: 'off', greetingMessage: `uptime-${suffix}` }
+        )
+        if (!putBotResp.resp.ok && putBotResp.resp.status < 500) {
+          throw new Error(`put app bot failed: ${putBotResp.resp.status} ${putBotResp.text}`)
+        }
+      } else {
+        // Expected for clean B2B apps: legacy aiBot is not auto-provisioned.
+        step('put_app_bot_v2_skipped', { reason: 'legacy_bot_not_initialized' })
       }
     } else if (getBotResp.resp.status < 500) {
       throw new Error(`get app bot failed: ${getBotResp.resp.status} ${getBotResp.text}`)
     } else {
       step('get_app_bot_v2_skipped', { status: getBotResp.resp.status })
     }
+
+    // NOTE: AI Agents / crawling / widget are deliberately NOT exercised in the
+    // standard b2b journey — the AI module can be disabled at deploy-config level
+    // on some deployments, so testing it here would false-RED those servers. The
+    // forward path for B2B AI (Agents API) is covered by the separate, opt-in
+    // `journey_ai` synthetic, which only runs where AI is enabled.
 
     step('create_app_token_v2')
     const createTokenResp = await httpJson(
@@ -1640,6 +1667,152 @@ async function runJourneyB2B(env: JourneyEnv): Promise<JourneyResult> {
       } catch (e) { cleanupErr('delete_token_v2', e) }
     }
 
+    if (createdAppId) {
+      try {
+        step('cleanup_delete_app_v2')
+        const r = await httpJson(
+          'DELETE',
+          `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}`,
+          { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS }
+        )
+        if (!r.resp.ok) cleanupErr('delete_app_v2', new Error(`status=${r.resp.status} ${r.text}`))
+      } catch (e) { cleanupErr('delete_app_v2', e) }
+    }
+  }
+}
+
+// Opt-in AI journey — exercises the Agents API forward path (create agent →
+// list → invite into a room → inspect bot-instances). Only meaningful where the
+// AI module is enabled at deploy-config level; enable this journey per-deploy
+// (checkId `<instance>:journey_ai`). Steps that depend on the ai-service are
+// best-effort: a 5xx is recorded as a skip rather than a hard failure, so a
+// transient ai-service blip doesn't false-RED the whole journey. The synthetic
+// app is deleted at cleanup, which cascade-purges the app-scoped agent.
+async function runJourneyAI(env: JourneyEnv): Promise<JourneyResult> {
+  const suffix = randSuffix()
+  const appDisplayName = SYNTHETIC_APP_DISPLAY_NAME_AI
+  const details: Record<string, any> = {
+    suffix,
+    appDisplayName,
+    mode: 'ai',
+    steps: [],
+    cleanup: { errors: [] as Array<{ stage: string; message: string }> },
+  }
+
+  const b2b = getB2BEnvFromProcess()
+  const parentServerToken = createServerToken(b2b.appId, b2b.appSecret)
+  const step = (name: string, extra?: any) => details.steps.push({ name, ...extra, ts: new Date().toISOString() })
+  const cleanupErr = (stage: string, e: any) => {
+    details.cleanup.errors.push({ stage, message: e?.message || String(e) })
+  }
+
+  let syntheticApp: SyntheticAppRef | null = null
+  let createdAppId: string | null = null
+
+  try {
+    step('prepare_synthetic_app_v2', { displayName: appDisplayName })
+    syntheticApp = await prepareSyntheticAppV2(env.ethoraApiBase, parentServerToken, appDisplayName)
+    createdAppId = syntheticApp.appId
+    details.appId = syntheticApp.appId
+    details.orphansCleaned = syntheticApp.orphansCleaned
+    if (syntheticApp.orphansCleaned > 0) {
+      step('cleaned_orphans_v2', { count: syntheticApp.orphansCleaned })
+    }
+    step('create_app_v2', { appId: syntheticApp.appId })
+
+    // 1) Create an app-scoped Agent (the B2B forward path for AI).
+    step('create_app_agent_v2')
+    const createAgentResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/agents`,
+      { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS },
+      { displayName: `uptime-agent-${suffix}`, prompt: 'uptime synthetic agent', visibility: 'private' }
+    )
+    if (!createAgentResp.resp.ok) {
+      if (createAgentResp.resp.status < 500) {
+        throw new Error(`create app agent failed: ${createAgentResp.resp.status} ${createAgentResp.text}`)
+      }
+      // ai-service / dependency down — nothing more to exercise this run.
+      step('create_app_agent_v2_skipped', { status: createAgentResp.resp.status })
+      step('ok')
+      return { ok: true, details }
+    }
+    const createdAgentId = String(createAgentResp.json?.agent?.id || '').trim()
+    details.agentId = createdAgentId || null
+
+    // 2) List app agents and assert the new one is present.
+    step('list_app_agents_v2')
+    const listAgentsResp = await httpJson(
+      'GET',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/agents?limit=20&offset=0`,
+      { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS }
+    )
+    if (!listAgentsResp.resp.ok) throw new Error(`list app agents failed: ${listAgentsResp.resp.status} ${listAgentsResp.text}`)
+    if (createdAgentId) {
+      const items = Array.isArray(listAgentsResp.json?.items) ? listAgentsResp.json.items : []
+      if (!items.some((a: any) => String(a?.id || '') === createdAgentId)) {
+        throw new Error('created agent not found in app agents list')
+      }
+    }
+
+    // 3) Provision a room and invite the agent into it. Invite spawns a live
+    // BotInstance via ai-service, so treat 5xx as a skip.
+    step('provision_room_v2')
+    const provisionResp = await httpJson(
+      'POST',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/provision`,
+      { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS },
+      { rooms: [{ title: `ai-room-${suffix}`, pinned: false }] }
+    )
+    if (!provisionResp.resp.ok) throw new Error(`provision room failed: ${provisionResp.resp.status} ${provisionResp.text}`)
+    const provisionedRoom = Array.isArray(provisionResp.json?.details) ? provisionResp.json.details[0]?.room : undefined
+    const chatJid = String(provisionedRoom?.jid || '').trim()
+
+    if (createdAgentId && chatJid) {
+      step('invite_agent_to_chat_v2')
+      const inviteResp = await httpJson(
+        'POST',
+        `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/agents/${encodeURIComponent(createdAgentId)}/invite-to-chat`,
+        { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS },
+        { chatJid }
+      )
+      if (!inviteResp.resp.ok && inviteResp.resp.status < 500) {
+        throw new Error(`invite agent to chat failed: ${inviteResp.resp.status} ${inviteResp.text}`)
+      } else if (!inviteResp.resp.ok) {
+        step('invite_agent_to_chat_v2_skipped', { status: inviteResp.resp.status })
+      }
+    } else {
+      step('invite_agent_to_chat_v2_skipped', { reason: 'no_room_jid' })
+    }
+
+    // 4) Inspect BotInstances for the app (read-only; best-effort on 5xx).
+    step('list_app_bot_instances_v2')
+    const listBiResp = await httpJson(
+      'GET',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/bot-instances`,
+      { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS }
+    )
+    if (!listBiResp.resp.ok && listBiResp.resp.status < 500) {
+      throw new Error(`list app bot-instances failed: ${listBiResp.resp.status} ${listBiResp.text}`)
+    } else if (!listBiResp.resp.ok) {
+      step('list_app_bot_instances_v2_skipped', { status: listBiResp.resp.status })
+    }
+
+    step('delete_app_v2')
+    const deleteAppResp = await httpJson(
+      'DELETE',
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}`,
+      { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS }
+    )
+    if (!deleteAppResp.resp.ok) throw new Error(`delete app failed: ${deleteAppResp.resp.status} ${deleteAppResp.text}`)
+    createdAppId = null
+
+    step('ok')
+    return { ok: true, details }
+  } catch (e: any) {
+    step('error', { message: e?.message || String(e) })
+    return { ok: false, details: { ...details, error: e?.message || String(e) } }
+  } finally {
     if (createdAppId) {
       try {
         step('cleanup_delete_app_v2')
