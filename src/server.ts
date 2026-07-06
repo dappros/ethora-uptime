@@ -153,10 +153,13 @@ async function main() {
   // `WebSocket` polyfill, missing env, network glitch on the probe itself) from a
   // genuine "monitored service is failing". Checker errors should bubble up as AMBER
   // (warning) on the wallboard rather than RED, otherwise the dashboard is misleading.
-  function classifyErrorText(errText: string | null | undefined): 'service_fail' | 'checker_error' | 'skipped' {
+  function classifyErrorText(errText: string | null | undefined): 'service_fail' | 'checker_error' | 'skipped' | 'degraded' {
     const s = String(errText || '')
     if (!s) return 'service_fail'
     if (s.startsWith('skipped:')) return 'skipped'
+    // 'warn:'-prefixed failures are soft degradations (e.g. a TLS cert that is
+    // valid but expiring soon) - surface them as amber, not red.
+    if (s.startsWith('warn:')) return 'degraded'
     const checkerSignals = [
       'WebSocket is not defined',
       'Missing env:',
@@ -261,7 +264,7 @@ async function main() {
             totals.optionalFailing += 1
           } else {
             totals.criticalFailing += 1
-            if (errClass === 'skipped' || errClass === 'checker_error') {
+            if (errClass === 'skipped' || errClass === 'checker_error' || errClass === 'degraded') {
               hasWarn = true
             } else {
               hasFail = true

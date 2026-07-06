@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import yaml from 'js-yaml'
 
-export type CheckType = 'http' | 'wss' | 'journey' | 'xmpp_muc_echo' | 'push_validate'
+export type CheckType = 'http' | 'wss' | 'journey' | 'xmpp_muc_echo' | 'push_validate' | 'tls'
 export type CheckSeverity = 'critical' | 'optional'
 
 export type StatusRule =
@@ -27,6 +27,11 @@ export type CheckConfig = {
   headers?: Record<string, string>
   body?: string
   expect?: StatusRule[]
+  // For type=tls only: certificate-expiry thresholds, in days remaining.
+  // remaining < critDays (or already expired) -> red; remaining < warnDays -> amber.
+  // Defaults: warnDays 21, critDays 7.
+  warnDays?: number
+  critDays?: number
 }
 
 export type InstanceConfig = {

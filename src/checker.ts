@@ -6,6 +6,7 @@ import crypto from 'node:crypto'
 import { client as xmppClient, xml } from '@xmpp/client'
 import http from 'node:http'
 import https from 'node:https'
+import tls from 'node:tls'
 
 // `@xmpp/client` (in browser/websocket transport mode) looks up `globalThis.WebSocket`.
 // Node 20 doesn't expose this as a global, so the xmpp_muc_echo / journey checks would
@@ -52,7 +53,99 @@ export async function runCheckWithOpts(check: CheckConfig, opts: RunCheckOpts = 
   if (check.type === 'xmpp_muc_echo') {
     return await runXmppMucEchoCheck(check)
   }
+  if (check.type === 'tls') {
+    return await runTlsCheck(check)
+  }
   return { ok: false, durationMs: 0, errorText: `Unknown check type: ${(check as any).type}` }
+}
+
+// Parse a tls check target into { host, port }. Accepts an https:// URL
+// (e.g. "https://api.example.com"), a bare host, or "host:port". Port
+// defaults to 443.
+function parseTlsTarget(raw: string): { host: string; port: number } | null {
+  const s = String(raw || '').trim()
+  if (!s) return null
+  try {
+    if (s.includes('://')) {
+      const u = new URL(s)
+      return { host: u.hostname, port: u.port ? Number(u.port) : 443 }
+    }
+    const idx = s.lastIndexOf(':')
+    if (idx > 0) {
+      return { host: s.slice(0, idx), port: Number(s.slice(idx + 1)) || 443 }
+    }
+    return { host: s, port: 443 }
+  } catch {
+    return null
+  }
+}
+
+// Certificate-expiry check. Opens a TLS connection (SNI = host), reads the
+// peer certificate's notAfter, and reports on days remaining:
+//   expired or < critDays  -> red   (service_fail)
+//   < warnDays             -> amber ("warn:" prefix classifies as degraded)
+//   otherwise              -> green
+// rejectUnauthorized is off so we can still read (and report on) an already
+// expired cert instead of failing the handshake opaquely. Connection failures
+// are reported with a checker-error signal (amber) so this check stays focused
+// on certificate validity rather than doubling as a reachability probe.
+async function runTlsCheck(check: CheckConfig): Promise<CheckRunResult> {
+  const start = nowMs()
+  const target = parseTlsTarget(check.url || '')
+  if (!target || !target.host) {
+    return { ok: false, durationMs: 0, errorText: `invalid url for tls check: ${check.url}` }
+  }
+  const warnDays = Number.isFinite(Number(check.warnDays)) ? Number(check.warnDays) : 21
+  const critDays = Number.isFinite(Number(check.critDays)) ? Number(check.critDays) : 7
+  const timeoutMs = Math.max(1000, Number(check.timeoutMs || 6000))
+
+  return await new Promise<CheckRunResult>((resolve) => {
+    let settled = false
+    const finish = (r: CheckRunResult) => {
+      if (settled) return
+      settled = true
+      try { socket.destroy() } catch {}
+      resolve(r)
+    }
+    const socket = tls.connect({
+      host: target.host,
+      port: target.port,
+      servername: target.host, // SNI - these hosts serve multiple certs per IP
+      rejectUnauthorized: false,
+      timeout: timeoutMs,
+    })
+    socket.once('secureConnect', () => {
+      const cert = socket.getPeerCertificate(false)
+      if (!cert || !cert.valid_to) {
+        return finish({ ok: false, durationMs: nowMs() - start, errorText: 'tls check: no peer certificate' })
+      }
+      const notAfter = new Date(cert.valid_to).getTime()
+      const days = Math.floor((notAfter - nowMs()) / 86400000)
+      const details = {
+        host: target.host,
+        port: target.port,
+        validTo: cert.valid_to,
+        daysRemaining: days,
+        subject: cert.subject?.CN,
+        issuer: cert.issuer?.O || cert.issuer?.CN,
+      }
+      if (Number.isNaN(notAfter)) {
+        return finish({ ok: false, durationMs: nowMs() - start, errorText: `tls check: unparseable valid_to ${cert.valid_to}`, details })
+      }
+      if (days < 0) {
+        return finish({ ok: false, durationMs: nowMs() - start, errorText: `TLS certificate EXPIRED ${-days} day(s) ago (valid_to ${cert.valid_to})`, details })
+      }
+      if (days < critDays) {
+        return finish({ ok: false, durationMs: nowMs() - start, errorText: `TLS certificate expires in ${days} day(s) (valid_to ${cert.valid_to})`, details })
+      }
+      if (days < warnDays) {
+        return finish({ ok: false, durationMs: nowMs() - start, errorText: `warn: TLS certificate expires in ${days} day(s) (valid_to ${cert.valid_to})`, details })
+      }
+      return finish({ ok: true, durationMs: nowMs() - start, details })
+    })
+    socket.once('timeout', () => finish({ ok: false, durationMs: nowMs() - start, errorText: `tls check: connect timeout (ETIMEDOUT) after ${timeoutMs}ms to ${target.host}:${target.port}` }))
+    socket.once('error', (e: any) => finish({ ok: false, durationMs: nowMs() - start, errorText: `tls check: connect error to ${target.host}:${target.port}: ${e?.message || String(e)}` }))
+  })
 }
 
 function mustEnv(name: string) {
@@ -178,6 +271,19 @@ async function runHttpCheck(check: CheckConfig): Promise<CheckRunResult> {
 
     const expect = check.expect || []
     const jsonRules = expect.filter((r) => r.type === 'json')
+
+    // A `status_code` rule explicitly declares which HTTP statuses are
+    // acceptable, so it — not `resp.ok` — is authoritative for the status
+    // dimension. Without this, a check that legitimately expects a non-2xx
+    // status (e.g. a 422 "email already exists" signup probe) could never go
+    // green: `resp.ok` is false for anything outside 2xx, and the old
+    // `ok = ok && rule.expected.includes(status)` could only ever keep it false.
+    const statusRules = expect.filter((r) => r.type === 'status_code')
+    if (statusRules.length) {
+      ok = statusRules.every((r) => r.expected.includes(statusCode))
+      details.statusExpected = statusRules.flatMap((r) => r.expected)
+    }
+
     let parsedJson: any = undefined
     let jsonParsedOk = false
     if (jsonRules.length) {
@@ -191,25 +297,20 @@ async function runHttpCheck(check: CheckConfig): Promise<CheckRunResult> {
       }
     }
 
-    for (const rule of expect) {
-      if (rule.type === 'status_code') {
-        ok = ok && rule.expected.includes(statusCode)
-        details.statusExpected = rule.expected
-      } else if (rule.type === 'json') {
-        if (!jsonParsedOk) {
-          // Only fail the check if the rule is asserting something.
-          // If it's a capture-only rule (captureAs) we don't fail.
-          if (rule.exists || rule.equals !== undefined) ok = false
-          details.jsonParse = 'failed'
-          continue
-        }
-        const value = getJsonPath(parsedJson, rule.path)
-        if (rule.exists) ok = ok && value !== undefined && value !== null
-        if (rule.equals !== undefined) ok = ok && String(value) === rule.equals
-        if (rule.captureAs && typeof rule.captureAs === 'string') {
-          details.captures = details.captures || {}
-          details.captures[rule.captureAs] = value ?? null
-        }
+    for (const rule of jsonRules) {
+      if (!jsonParsedOk) {
+        // Only fail the check if the rule is asserting something.
+        // If it's a capture-only rule (captureAs) we don't fail.
+        if (rule.exists || rule.equals !== undefined) ok = false
+        details.jsonParse = 'failed'
+        continue
+      }
+      const value = getJsonPath(parsedJson, rule.path)
+      if (rule.exists) ok = ok && value !== undefined && value !== null
+      if (rule.equals !== undefined) ok = ok && String(value) === rule.equals
+      if (rule.captureAs && typeof rule.captureAs === 'string') {
+        details.captures = details.captures || {}
+        details.captures[rule.captureAs] = value ?? null
       }
     }
 

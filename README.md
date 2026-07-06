@@ -229,6 +229,28 @@ There is an optional check type:
 It logs into the Ethora API using the same env vars as journeys (`ETHORA_API_BASE`, `ETHORA_BASE_DOMAIN_NAME`, `ETHORA_ADMIN_EMAIL`, `ETHORA_ADMIN_PASSWORD`)
 and calls `POST /v1/push/validate/{appId}` to perform a Firebase **dry-run** validation.
 
+## TLS certificate expiry check
+
+```yaml
+- id: cert_api
+  type: tls
+  url: "https://api.example.com"   # https:// url, bare host, or host:port (defaults to :443)
+  intervalSeconds: 3600
+  timeoutMs: 8000
+  warnDays: 21                     # amber when fewer days remain (default 21)
+  critDays: 7                      # red when fewer days remain, or already expired (default 7)
+```
+
+`type: tls` opens a TLS connection (SNI = host), reads the peer certificate's
+`notAfter`, and reports on the days remaining: **green** above `warnDays`,
+**amber** below it, **red** below `critDays` or once expired. It is the
+proactive safety net for a silently-broken auto-renewal - since certbot renews
+at ~30 days remaining, a cert reaching 21 days means renewal has stalled. The
+public checks in the enterprise deploy config include one per public subdomain.
+Certificate validity is judged from `notAfter` (the handshake itself uses
+`rejectUnauthorized: false` so an already-expired cert is still read and
+reported rather than failing opaquely); connection failures surface as amber.
+
 ## Operator observer room (watch journeys live)
 
 By default, journey runs create their own temporary chats and operate there (so membership/removal tests are isolated).
