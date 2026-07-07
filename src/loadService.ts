@@ -131,13 +131,15 @@ export function getMetricsText(): string {
    const running = isRunning ? 1 : 0
    const p = run?.progress
    const elapsed = p?.elapsedSeconds || 0
-   const ok = p?.ok || 0
-   const total = p?.totalIterations || 0
-   const failed = p?.failed || 0
-   // Live gauges must read 0 while no run is active. Otherwise they freeze at
-   // the last progress snapshot — e.g. inFlight=2 captured the instant the run
-   // finished — and the dashboard shows phantom in-flight work / throughput long
-   // after the run is done. ok/total/failed intentionally persist (last result).
+   // All live counters read 0 while no run is active. Otherwise they freeze at
+   // the last progress snapshot (inFlight=2, ok=9, …) and the time-series panels
+   // look "stuck" for as long as the box sits idle. The last run's totals stay
+   // available in the load.html RESULT / RECENT RUNS view; the latency panel
+   // (run.result.latency) still persists since it is explicitly "last finished
+   // run".
+   const ok = isRunning ? (p?.ok || 0) : 0
+   const total = isRunning ? (p?.totalIterations || 0) : 0
+   const failed = isRunning ? (p?.failed || 0) : 0
    const inflight = isRunning ? (p?.inFlight || 0) : 0
    const throughput = isRunning ? (elapsed > 0 ? total / elapsed : 0) : 0
    const lat = run?.result?.latency
