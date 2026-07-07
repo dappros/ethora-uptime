@@ -127,14 +127,19 @@ export function listRuns(): LoadRunState[] {
 // finishes, so they reflect the most recent completed run.
 export function getMetricsText(): string {
    const run = activeRun || history[0] || null
-   const running = activeRun ? 1 : 0
+   const isRunning = !!activeRun && activeRun.status === 'running'
+   const running = isRunning ? 1 : 0
    const p = run?.progress
    const elapsed = p?.elapsedSeconds || 0
    const ok = p?.ok || 0
    const total = p?.totalIterations || 0
    const failed = p?.failed || 0
-   const inflight = p?.inFlight || 0
-   const throughput = elapsed > 0 ? total / elapsed : (run?.result?.throughputPerSec || 0)
+   // Live gauges must read 0 while no run is active. Otherwise they freeze at
+   // the last progress snapshot — e.g. inFlight=2 captured the instant the run
+   // finished — and the dashboard shows phantom in-flight work / throughput long
+   // after the run is done. ok/total/failed intentionally persist (last result).
+   const inflight = isRunning ? (p?.inFlight || 0) : 0
+   const throughput = isRunning ? (elapsed > 0 ? total / elapsed : 0) : 0
    const lat = run?.result?.latency
    const lines: string[] = []
    const g = (name: string, help: string, value: number, labels = '') => {
