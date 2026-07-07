@@ -7,6 +7,14 @@ import { loadConfigFromFile } from './config.js'
 import { startScheduler } from './scheduler.js'
 import { runCheckWithOpts } from './checker.js'
 import { isCheckLocked, withCheckLock } from './runLock.js'
+import {
+  startLoadRun,
+  getRun as getLoadRun,
+  listRuns as listLoadRuns,
+  getEnvStatus as getLoadEnvStatus,
+  getMetricsText as getLoadMetricsText,
+  JOURNEY_MODES,
+} from './loadService.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -384,6 +392,50 @@ async function main() {
       bucketMinutes,
       buckets: dense,
     })
+  })
+
+  // ── Load testing ────────────────────────────────────────────────────────
+  // Operator-driven, ad-hoc load runs. State is in-memory (see loadService.ts):
+  // one active run at a time, polled by the /load.html UI.
+
+  app.get('/api/load/env', (_req, res) => {
+    res.json({ ...getLoadEnvStatus(), journeyModes: JOURNEY_MODES })
+  })
+
+  app.post('/api/load/start', (req, res) => {
+    try {
+      const state = startLoadRun({
+        scenario: req.body?.scenario,
+        mode: req.body?.mode,
+        parallelism: Number(req.body?.parallelism),
+        durationSeconds: Number(req.body?.durationSeconds),
+        rampUpSeconds: Number(req.body?.rampUpSeconds),
+        sleepBetweenIterationsMs: Number(req.body?.sleepBetweenIterationsMs),
+        label: req.body?.label,
+      })
+      return res.json({ runId: state.id, run: state })
+    } catch (e: any) {
+      const code = e?.code === 'LOAD_RUN_IN_PROGRESS' ? 409 : e?.code === 'MISSING_ENV' ? 422 : 500
+      return res.status(code).json({ error: e?.message || String(e), code: e?.code || 'LOAD_START_FAILED' })
+    }
+  })
+
+  app.get('/api/load/status', (req, res) => {
+    const runId = String(req.query.runId || '').trim()
+    if (!runId) return res.status(422).json({ error: 'runId is required' })
+    const run = getLoadRun(runId)
+    if (!run) return res.status(404).json({ error: 'run not found', runId })
+    return res.json({ run })
+  })
+
+  app.get('/api/load/list', (_req, res) => {
+    res.json({ runs: listLoadRuns() })
+  })
+
+  // Prometheus scrape target: load metrics (RPS / latency / errors / inflight)
+  // so Grafana can overlay them on cAdvisor/node_exporter resource graphs.
+  app.get('/metrics', (_req, res) => {
+    res.type('text/plain; version=0.0.4').send(getLoadMetricsText())
   })
 
   // Serve UI

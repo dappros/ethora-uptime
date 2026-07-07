@@ -55,7 +55,7 @@ export const SYNTHETIC_APP_DISPLAY_NAME_LIFECYCLE = '__uptime__journey_lifecycle
 export const SYNTHETIC_APP_DISPLAY_NAME_AI = '__uptime__journey_ai'
 
 // Stable header so a server admin can also distinguish these calls in logs/proxy rules.
-const SYNTHETIC_HEADERS: Record<string, string> = { 'x-ethora-synthetic': '1' }
+export const SYNTHETIC_HEADERS: Record<string, string> = { 'x-ethora-synthetic': '1' }
 
 export type JourneyEnv = {
   ethoraApiBase: string
@@ -90,6 +90,17 @@ type JourneyOptions = {
   // Optional operator room to stream journey progress into (room name or full room JID).
   // This does NOT replace the journey's own test rooms; it is only an observer stream.
   observerRoom?: string
+  // Load-testing only: override the synthetic app's displayName so each parallel
+  // iteration gets its OWN uniquely-named app. The journeys normally key the app
+  // by a stable per-mode displayName so a failed sequential run self-heals via
+  // orphan-sweep — but under parallelism that sweep archives sibling workers'
+  // live apps (403 APP_ARCHIVED). A unique displayName side-steps the collision.
+  appDisplayNameOverride?: string
+  // Load-testing only: a freshly-created synthetic app has no initialized AI bot,
+  // so PUT /bot returns 422 BOT_NOT_INITIALIZED. Uptime checks treat that as a
+  // hard failure (correctly); load runs set this to exercise the bot endpoints
+  // without the missing-bot 422 failing the whole journey.
+  tolerateUninitializedBot?: boolean
 }
 
 export type JourneyResult = {
@@ -144,12 +155,12 @@ function getXmppEnvFromProcess(): XmppEnv {
   return { serviceUrl, host, mucService }
 }
 
-type B2BEnv = {
+export type B2BEnv = {
   appId: string
   appSecret: string
 }
 
-function getB2BEnvFromProcess(): B2BEnv {
+export function getB2BEnvFromProcess(): B2BEnv {
   const appId = process.env.ETHORA_B2B_APP_ID || process.env.ETHORA_CHAT_APP_ID
   const appSecret = process.env.ETHORA_B2B_APP_SECRET || process.env.ETHORA_CHAT_APP_SECRET
   return {
@@ -185,7 +196,7 @@ function randSuffix() {
   return crypto.randomUUID().slice(0, 8)
 }
 
-async function httpJson(method: string, url: string, headers: Record<string, string>, body?: any) {
+export async function httpJson(method: string, url: string, headers: Record<string, string>, body?: any) {
   const resp = await fetch(url, {
     method,
     headers: {
@@ -212,7 +223,7 @@ function deriveScopedSecret(secret: string, purpose: string) {
   return crypto.createHmac('sha256', String(secret)).update(`ethora:${purpose}:v1`).digest('hex')
 }
 
-function createServerToken(appId: string, appSecret: string, tenantId?: string) {
+export function createServerToken(appId: string, appSecret: string, tenantId?: string) {
   const header = { alg: 'HS256', typ: 'JWT' }
   const payload: any = { data: { type: 'server', appId: String(appId) } }
   if (tenantId) payload.data.tenantId = String(tenantId)
@@ -228,7 +239,7 @@ function getResultObject(input: any) {
   return input?.result || input?.app || input
 }
 
-type SyntheticAppRef = {
+export type SyntheticAppRef = {
   appId: string
   appToken: string
   // Number of orphan apps from previous failed runs that were cleaned up before
@@ -280,7 +291,7 @@ async function deleteOrphansV1(
 // Sweep any orphan apps from previous failed runs (matching this stable displayName),
 // then create a fresh synthetic app. Always exercises POST /v1/apps so the synthetic
 // also doubles as a regression test for app creation.
-async function prepareSyntheticAppV1(
+export async function prepareSyntheticAppV1(
   apiBase: string,
   ownerToken: string,
   displayName: string
@@ -346,7 +357,7 @@ async function deleteOrphansV2(
 }
 
 // V2 / B2B variant: orphan-sweep + create fresh child app under the parent tenant.
-async function prepareSyntheticAppV2(
+export async function prepareSyntheticAppV2(
   apiBase: string,
   parentServerToken: string,
   displayName: string
@@ -383,7 +394,7 @@ async function prepareSyntheticAppV2(
   return { appId: id, appToken: resolvedToken, orphansCleaned }
 }
 
-async function pollUserBatchJob(apiBase: string, appId: string, authToken: string, jobId: string, timeoutMs = 120000) {
+export async function pollUserBatchJob(apiBase: string, appId: string, authToken: string, jobId: string, timeoutMs = 120000) {
   const startedAt = Date.now()
   while (Date.now() - startedAt < timeoutMs) {
     const resp = await httpJson(
@@ -1087,7 +1098,7 @@ async function runJourneyV2UserChats(env: JourneyEnv): Promise<JourneyResult> {
 
 export async function runJourney(env: JourneyEnv, opts?: JourneyOptions): Promise<JourneyResult> {
   const mode = resolveMode(env, opts)
-  if (mode === 'b2b') return await runJourneyB2B(env)
+  if (mode === 'b2b') return await runJourneyB2B(env, opts)
   if (mode === 'advanced') return await runJourneyAdvanced(env, opts)
   // Optional manual journeys
   if (mode === 'token_refresh') return await runJourneyTokenRefresh(env)
@@ -1307,11 +1318,12 @@ export async function runJourney(env: JourneyEnv, opts?: JourneyOptions): Promis
   }
 }
 
-async function runJourneyB2B(env: JourneyEnv): Promise<JourneyResult> {
+async function runJourneyB2B(env: JourneyEnv, opts?: JourneyOptions): Promise<JourneyResult> {
   // Per-run uniqueness happens at user/chat level (UUIDs include the suffix).
-  // The synthetic child app is reused across runs (Option A+C).
+  // The synthetic child app is reused across runs (Option A+C) unless a load run
+  // passes a unique displayName override to avoid cross-worker orphan-sweep.
   const suffix = randSuffix()
-  const appDisplayName = SYNTHETIC_APP_DISPLAY_NAME_B2B
+  const appDisplayName = opts?.appDisplayNameOverride || SYNTHETIC_APP_DISPLAY_NAME_B2B
   const details: Record<string, any> = {
     suffix,
     appDisplayName,
@@ -1408,7 +1420,14 @@ async function runJourneyB2B(env: JourneyEnv): Promise<JourneyResult> {
           { status: 'off', greetingMessage: `uptime-${suffix}` }
         )
         if (!putBotResp.resp.ok && putBotResp.resp.status < 500) {
-          throw new Error(`put app bot failed: ${putBotResp.resp.status} ${putBotResp.text}`)
+          const botCode = String(putBotResp.json?.code || '')
+          // Load runs use freshly-created apps that have no initialized bot yet;
+          // tolerate that specific 422 so the rest of the journey still runs.
+          if (opts?.tolerateUninitializedBot && putBotResp.resp.status === 422 && botCode === 'BOT_NOT_INITIALIZED') {
+            step('put_app_bot_v2_skipped', { status: 422, code: botCode })
+          } else {
+            throw new Error(`put app bot failed: ${putBotResp.resp.status} ${putBotResp.text}`)
+          }
         }
       } else {
         // Expected for clean B2B apps: legacy aiBot is not auto-provisioned.
@@ -1827,7 +1846,7 @@ async function runJourneyAI(env: JourneyEnv): Promise<JourneyResult> {
   }
 }
 
-async function joinRoomByWs(
+export async function joinRoomByWs(
   serviceUrl: string,
   domain: string,
   usernameLocal: string,
