@@ -527,7 +527,15 @@ async function joinRoomByWs(
   stage: string
 ) {
   return await new Promise<any>((resolve, reject) => {
-    const xmpp = xmppClient({ service: serviceUrl, domain, username: usernameLocal, password })
+    // @xmpp/client refuses PLAIN over an insecure (ws://) transport and, since the
+    // ejabberd listener only offers PLAIN, ends up selecting no mechanism ("SASL:
+    // Mechanism undefined not found"). The synthetic check talks to the trusted
+    // docker-internal ejabberd, so pass credentials as a function to force PLAIN.
+    const xmpp = xmppClient({
+      service: serviceUrl,
+      domain,
+      credentials: async (auth: any) => { await auth({ username: usernameLocal, password }, 'PLAIN') },
+    })
 
     let timeoutId: any
     let stanzaHandler: any
