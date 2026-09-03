@@ -200,6 +200,12 @@ export async function httpJson(method: string, url: string, headers: Record<stri
   const resp = await fetch(url, {
     method,
     headers: {
+      // Marker first so it is set on EVERY call, not only the ones that pass
+      // SYNTHETIC_HEADERS explicitly. The base-app admin login we make before
+      // any synthetic app exists is the case that matters: without the header
+      // its session row is indistinguishable from a real admin login, and it
+      // lands in the platform analytics reports every couple of hours.
+      ...SYNTHETIC_HEADERS,
       ...headers,
       ...(body ? { 'Content-Type': 'application/json' } : {}),
     },

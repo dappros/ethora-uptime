@@ -1,7 +1,7 @@
 // Ethora.com platform, copyright: Dappros Ltd (c) 2026, all rights reserved
 import { WebSocket } from 'ws'
 import type { CheckConfig } from './config.js'
-import { getJourneyEnvFromProcess, runJourney } from './journeyRunner.js'
+import { getJourneyEnvFromProcess, runJourney, SYNTHETIC_HEADERS } from './journeyRunner.js'
 import crypto from 'node:crypto'
 import { client as xmppClient, xml } from '@xmpp/client'
 import http from 'node:http'
@@ -161,7 +161,9 @@ async function httpJson(method: 'GET' | 'POST', url: string, headers: Record<str
   try {
     const resp = await fetch(url, {
       method,
-      headers: { ...(headers || {}), ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}) },
+      // Marker on every call so the admin logins these probes perform against
+      // the base app are excluded from the platform analytics reports.
+      headers: { ...SYNTHETIC_HEADERS, ...(headers || {}), ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}) },
       body: method === 'POST' ? JSON.stringify(body || {}) : undefined,
       signal: controller.signal,
     })
