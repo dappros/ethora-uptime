@@ -39,7 +39,8 @@ const SYNTHETIC_HEADERS: Record<string, string> = { 'x-ethora-synthetic': '1' }
 async function httpJson(method: string, url: string, headers: Record<string, string>, body?: any) {
    const resp = await fetch(url, {
       method,
-      headers: { ...headers, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      // Marker on every call — see the note in journeyRunner.ts's httpJson.
+      headers: { ...SYNTHETIC_HEADERS, ...headers, ...(body ? { 'Content-Type': 'application/json' } : {}) },
       body: body ? JSON.stringify(body) : undefined,
    })
    const text = await resp.text()
