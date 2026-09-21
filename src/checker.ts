@@ -487,7 +487,22 @@ async function ejabberdRoomExists(apiUrl: string, httpHost: string, admin: strin
     { name: roomName, service: mucService },
     timeoutMs
   )
-  return resp.ok
+  // ejabberd answers 200 with an empty option set for a room that doesn't exist,
+  // so the status alone says nothing.
+  if (!resp.ok || !resp.data || typeof resp.data !== 'object') return false
+  return Object.keys(resp.data).length > 0
+}
+
+// destroy_room returns once the room process has been told to stop; the process
+// unregisters a few ms later. A join sent in that window is routed to the dying
+// room and dropped, so nothing gets created and the join times out.
+async function waitForRoomGone(apiUrl: string, httpHost: string, admin: string, adminPassword: string, roomName: string, mucService: string, maxWaitMs: number) {
+  const deadline = nowMs() + maxWaitMs
+  while (nowMs() < deadline) {
+    if (!(await ejabberdRoomExists(apiUrl, httpHost, admin, adminPassword, roomName, mucService, Math.min(2000, maxWaitMs)))) return true
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  return false
 }
 
 function derivePassword(seed: string, tag: string): string {
@@ -664,7 +679,11 @@ async function runXmppMucEchoCheck(check: CheckConfig): Promise<CheckRunResult> 
       attempt.user2Ensure = await ensureXmppUser(apiUrl, xmppHost, admin, adminPassword, candidate.user2, pass2, userOpTimeout)
 
       if (candidate.strategy !== 'legacy_fallback') {
-        await ejabberdPostJson(apiUrl, xmppHost, admin, adminPassword, '/destroy_room', { name: candidate.roomName, service: mucService }, Math.min(8000, timeoutMs))
+        // Normally a no-op: the room is destroyed at the end of each run. This covers a run that was killed midway.
+        if (await ejabberdRoomExists(apiUrl, xmppHost, admin, adminPassword, candidate.roomName, mucService, Math.min(5000, timeoutMs))) {
+          await ejabberdPostJson(apiUrl, xmppHost, admin, adminPassword, '/destroy_room', { name: candidate.roomName, service: mucService }, Math.min(8000, timeoutMs))
+          attempt.staleRoomGone = await waitForRoomGone(apiUrl, xmppHost, admin, adminPassword, candidate.roomName, mucService, Math.min(3000, timeoutMs))
+        }
 
         const adminLocal = String(admin || adminDefault).split('@')[0] || 'admin'
         const adminJoinTimeout = Math.min(10000, timeoutMs)
@@ -732,6 +751,10 @@ async function runXmppMucEchoCheck(check: CheckConfig): Promise<CheckRunResult> 
       try { if (adminXmpp) await adminXmpp.stop() } catch {}
       try { if (xmpp1) await xmpp1.stop() } catch {}
       try { if (xmpp2) await xmpp2.stop() } catch {}
+      // Leave no room behind, so the next run creates it from scratch instead of racing a destroy.
+      if (candidate.strategy !== 'legacy_fallback') {
+        try { await ejabberdPostJson(apiUrl, xmppHost, admin, adminPassword, '/destroy_room', { name: candidate.roomName, service: mucService }, Math.min(8000, timeoutMs)) } catch {}
+      }
     }
   }
 
