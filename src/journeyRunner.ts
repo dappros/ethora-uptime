@@ -616,12 +616,14 @@ async function teardownSyntheticContext(
   }
 
   // 5) app (admin auth) — always last so we have an app context for the
-  // user/chat/file deletes above.
+  // user/chat/file deletes above. Hard delete: the default is a soft archive
+  // that nothing purges, and a journey every ~40 minutes left thousands of
+  // archived `__uptime__*` apps and their users on long-running installs.
   try {
     step('cleanup_delete_app')
     const r = await httpJson(
       'DELETE',
-      `${env.ethoraApiBase}/v1/apps/${encodeURIComponent(String(ctx.syntheticApp.appId))}`,
+      `${env.ethoraApiBase}/v1/apps/${encodeURIComponent(String(ctx.syntheticApp.appId))}?mode=hard`,
       { Authorization: `Bearer ${ownerToken}`, ...SYNTHETIC_HEADERS }
     )
     if (!r.resp.ok) cleanupErr('delete_app', new Error(`status=${r.resp.status} ${r.text}`))
