@@ -1326,6 +1326,27 @@ export async function runJourney(env: JourneyEnv, opts?: JourneyOptions): Promis
   }
 }
 
+// Agents are account-level: deleting the synthetic App does not delete an
+// agent created for it (the B2B journey's legacy bot write gives the App its
+// own copy of the shared Support Agent; the AI journey creates one). Delete it
+// through the App-scoped route before the App goes. Best-effort: 404 means it
+// is already gone (or was the shared template, which is never deleted), and a
+// backend without the route must not turn the journey red.
+async function deleteJourneyAgent(
+  env: JourneyEnv,
+  token: string,
+  appId: string,
+  agentId: string,
+  step: (name: string, extra?: any) => void
+): Promise<void> {
+  const r = await httpJson(
+    'DELETE',
+    `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(appId)}/agents/${encodeURIComponent(agentId)}`,
+    { Authorization: `Bearer ${token}`, ...SYNTHETIC_HEADERS }
+  )
+  step('delete_app_agent_v2', { agentId, status: r.resp.status })
+}
+
 async function runJourneyB2B(env: JourneyEnv, opts?: JourneyOptions): Promise<JourneyResult> {
   // Per-run uniqueness happens at user/chat level (UUIDs include the suffix).
   // The synthetic child app is reused across runs (Option A+C) unless a load run
@@ -1352,6 +1373,7 @@ async function runJourneyB2B(env: JourneyEnv, opts?: JourneyOptions): Promise<Jo
   let createdChatName: string | null = null
   const createdUserUuids: string[] = []
   let createdTokenId: string | null = null
+  let createdBotAgentId: string | null = null
 
   try {
     step('prepare_synthetic_app_v2', { displayName: appDisplayName })
@@ -1427,6 +1449,9 @@ async function runJourneyB2B(env: JourneyEnv, opts?: JourneyOptions): Promise<Jo
           { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS },
           { status: 'off', greetingMessage: `uptime-${suffix}` }
         )
+        // The greeting is a per-App edit, so the App now has its own agent.
+        const botAgentId = String(putBotResp.json?.bot?.savedAgentId || '').trim()
+        if (putBotResp.resp.ok && botAgentId) createdBotAgentId = botAgentId
         if (!putBotResp.resp.ok && putBotResp.resp.status < 500) {
           const botCode = String(putBotResp.json?.code || '')
           // Load runs use freshly-created apps that have no initialized bot yet;
@@ -1641,6 +1666,11 @@ async function runJourneyB2B(env: JourneyEnv, opts?: JourneyOptions): Promise<Jo
       createdTokenId = null
     }
 
+    if (createdBotAgentId) {
+      await deleteJourneyAgent(env, parentServerToken, createdAppId, createdBotAgentId, step)
+      createdBotAgentId = null
+    }
+
     step('delete_app_v2')
     const deleteAppResp = await httpJson(
       'DELETE',
@@ -1694,6 +1724,12 @@ async function runJourneyB2B(env: JourneyEnv, opts?: JourneyOptions): Promise<Jo
       } catch (e) { cleanupErr('delete_token_v2', e) }
     }
 
+    if (createdBotAgentId && createdAppId) {
+      try {
+        await deleteJourneyAgent(env, parentServerToken, createdAppId, createdBotAgentId, step)
+      } catch (e) { cleanupErr('delete_app_agent_v2', e) }
+    }
+
     if (createdAppId) {
       try {
         step('cleanup_delete_app_v2')
@@ -1714,7 +1750,8 @@ async function runJourneyB2B(env: JourneyEnv, opts?: JourneyOptions): Promise<Jo
 // (checkId `<instance>:journey_ai`). Steps that depend on the ai-service are
 // best-effort: a 5xx is recorded as a skip rather than a hard failure, so a
 // transient ai-service blip doesn't false-RED the whole journey. The synthetic
-// app is deleted at cleanup, which cascade-purges the app-scoped agent.
+// app is deleted at cleanup, after the agent it created (agents are
+// account-level and outlive the App).
 async function runJourneyAI(env: JourneyEnv): Promise<JourneyResult> {
   const suffix = randSuffix()
   const appDisplayName = SYNTHETIC_APP_DISPLAY_NAME_AI
@@ -1735,6 +1772,7 @@ async function runJourneyAI(env: JourneyEnv): Promise<JourneyResult> {
 
   let syntheticApp: SyntheticAppRef | null = null
   let createdAppId: string | null = null
+  let createdAgentForCleanup: string | null = null
 
   try {
     step('prepare_synthetic_app_v2', { displayName: appDisplayName })
@@ -1765,6 +1803,7 @@ async function runJourneyAI(env: JourneyEnv): Promise<JourneyResult> {
       return { ok: true, details }
     }
     const createdAgentId = String(createAgentResp.json?.agent?.id || '').trim()
+    createdAgentForCleanup = createdAgentId || null
     details.agentId = createdAgentId || null
 
     // 2) List app agents and assert the new one is present.
@@ -1825,6 +1864,11 @@ async function runJourneyAI(env: JourneyEnv): Promise<JourneyResult> {
       step('list_app_bot_instances_v2_skipped', { status: listBiResp.resp.status })
     }
 
+    if (createdAgentForCleanup) {
+      await deleteJourneyAgent(env, parentServerToken, createdAppId, createdAgentForCleanup, step)
+      createdAgentForCleanup = null
+    }
+
     step('delete_app_v2')
     const deleteAppResp = await httpJson(
       'DELETE',
@@ -1840,6 +1884,12 @@ async function runJourneyAI(env: JourneyEnv): Promise<JourneyResult> {
     step('error', { message: e?.message || String(e) })
     return { ok: false, details: { ...details, error: e?.message || String(e) } }
   } finally {
+    if (createdAgentForCleanup && createdAppId) {
+      try {
+        await deleteJourneyAgent(env, parentServerToken, createdAppId, createdAgentForCleanup, step)
+      } catch (e) { cleanupErr('delete_app_agent_v2', e) }
+    }
+
     if (createdAppId) {
       try {
         step('cleanup_delete_app_v2')
