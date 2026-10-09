@@ -65,6 +65,11 @@ RUN npm run build \
  && npm prune --omit=dev
 
 FROM node:20-bookworm-slim AS run
+# `upgrade` picks up Debian security fixes published after the base image was
+# built (the release workflow blocks on fixable CRITICAL CVEs).
+RUN apt-get update \
+ && apt-get upgrade -y --no-install-recommends \
+ && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=build /app/dist ./dist
