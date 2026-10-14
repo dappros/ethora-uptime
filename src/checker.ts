@@ -388,22 +388,16 @@ async function runJourneyCheck(check: CheckConfig, opts: RunCheckOpts): Promise<
   }
 }
 
-async function getBaseAppId(timeoutMs: number): Promise<string> {
-  const apiBase = envStr('ETHORA_API_BASE', '').replace(/\/$/, '')
-  const baseDomainName = envStr('ETHORA_BASE_DOMAIN_NAME', '')
-  if (!apiBase || !baseDomainName) return ''
-
-  const cfg = await httpJson(
-    'GET',
-    `${apiBase}/v1/apps/get-config?domainName=${encodeURIComponent(baseDomainName)}`,
-    {},
-    undefined,
-    timeoutMs
-  )
-  if (!cfg.resp.ok) return ''
-
-  const baseAppObj = cfg.json?.app || cfg.json?.result?.app || cfg.json?.result || cfg.json
-  return String(baseAppObj?._id || baseAppObj?.id || '').trim()
+// The chat echo check runs in a synthetic app of its own, not in the base
+// app: its messages are counted per app (the sender JID's prefix), so in the
+// base app they showed up as some 40 chats an hour on a server nobody uses.
+// No App document backs this id; ejabberd only checks that the room shares
+// the users' prefix, and the API counts the messages under the id and skips
+// archiving them (no such chat), so nothing appears in the admin panel. The id
+// is 24 hex characters like a real app id, derived from the XMPP host so it
+// stays the same across restarts.
+function syntheticEchoAppId(xmppHost: string): string {
+  return crypto.createHash('sha256').update(`ethora-uptime:xmpp-echo:${xmppHost}`).digest('hex').slice(0, 24)
 }
 
 function envStr(name: string, def = ''): string {
@@ -620,13 +614,13 @@ async function runXmppMucEchoCheck(check: CheckConfig): Promise<CheckRunResult> 
     return { ok: false, durationMs: nowMs() - start, errorText: 'skipped: Missing env: ETHORA_XMPP_ADMIN_PASSWORD' }
   }
 
-  const baseAppId = await getBaseAppId(Math.min(10000, timeoutMs))
+  const echoAppId = syntheticEchoAppId(xmppHost)
   const legacyUser1 = 'uptime_health_u1'
   const legacyUser2 = 'uptime_health_u2'
   const legacyRoom = 'uptime_health_room'
-  const appScopedUser1 = baseAppId ? `${baseAppId}_000000000000000000000001` : legacyUser1
-  const appScopedUser2 = baseAppId ? `${baseAppId}_000000000000000000000002` : legacyUser2
-  const appScopedRoom = baseAppId ? `${baseAppId}_00000000000000000000000a` : legacyRoom
+  const appScopedUser1 = `${echoAppId}_000000000000000000000001`
+  const appScopedUser2 = `${echoAppId}_000000000000000000000002`
+  const appScopedRoom = `${echoAppId}_00000000000000000000000a`
 
   const explicitUser1 = envStr('ETHORA_XMPP_HEALTH_USER1', '')
   const explicitUser2 = envStr('ETHORA_XMPP_HEALTH_USER2', '')
@@ -639,14 +633,14 @@ async function runXmppMucEchoCheck(check: CheckConfig): Promise<CheckRunResult> 
   const pass1 = envStr('ETHORA_XMPP_HEALTH_PASS1', derivePassword(adminPassword, 'u1'))
   const pass2 = envStr('ETHORA_XMPP_HEALTH_PASS2', derivePassword(adminPassword, 'u2'))
   const candidates = [
-    { strategy: baseAppId ? 'app_scoped' : 'legacy', user1: primaryUser1, user2: primaryUser2, roomName: primaryRoom },
+    { strategy: 'app_scoped', user1: primaryUser1, user2: primaryUser2, roomName: primaryRoom },
   ]
-  if (!hasExplicitHealthOverrides && baseAppId) {
+  if (!hasExplicitHealthOverrides) {
     candidates.push({ strategy: 'legacy_fallback', user1: legacyUser1, user2: legacyUser2, roomName: legacyRoom })
   }
 
   const details: Record<string, any> = {
-    baseAppId,
+    echoAppId,
     serviceUrl,
     apiUrl,
     attempts: [],
