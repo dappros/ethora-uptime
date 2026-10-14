@@ -28,9 +28,13 @@ if (typeof (globalThis as any).WebSocket === 'undefined') {
 // (basic + advanced + b2b) can run concurrently without colliding on the
 // same name in flight (runLock already prevents same-mode concurrency).
 //
-// If a previous run died mid-way and left an orphan, the next run's
-// `prepareSyntheticApp*` helper finds it by displayName and deletes it
-// before creating its own fresh app — leaks self-heal automatically.
+// Every app delete is a hard delete (`?mode=hard`, a cascade purge); a plain
+// DELETE only archives, which left a growing "Archived" list of `__uptime__*`
+// apps and their users on every install.
+// If a previous run died mid-way and left an orphan (or an older version left
+// an archived one), the next run's `prepareSyntheticApp*` helper finds it by
+// displayName, archived apps included, and purges it before creating its own
+// fresh app, so leaks self-heal.
 export const SYNTHETIC_APP_DISPLAY_NAME_PREFIX = '__uptime__'
 export const SYNTHETIC_APP_DISPLAY_NAME_BASIC = '__uptime__journey'
 export const SYNTHETIC_APP_DISPLAY_NAME_ADVANCED = '__uptime__journey_advanced'
@@ -254,8 +258,10 @@ export type SyntheticAppRef = {
   orphansCleaned: number
 }
 
-// Find every existing app whose displayName === <displayName> and delete each one.
-// This recovers from previous failed runs that left an orphan app behind.
+// Find every existing app whose displayName === <displayName>, archived ones
+// included, and purge each one (hard delete: the app, its users, chats and
+// files). This recovers from runs that died mid-way and from older uptime
+// versions that archived their apps instead of purging them.
 // Returns the count of orphans deleted (0 in the happy path).
 async function deleteOrphansV1(
   apiBase: string,
@@ -268,7 +274,7 @@ async function deleteOrphansV1(
   for (let page = 0; page < 5; page++) {
     const list = await httpJson(
       'GET',
-      `${apiBase}/v1/apps?limit=${limit}&offset=${offset}&orderBy=displayName&order=asc`,
+      `${apiBase}/v1/apps?limit=${limit}&offset=${offset}&orderBy=displayName&order=asc&includeArchived=true`,
       { Authorization: `Bearer ${ownerToken}`, ...SYNTHETIC_HEADERS }
     )
     if (!list.resp.ok) break
@@ -280,7 +286,7 @@ async function deleteOrphansV1(
       try {
         await httpJson(
           'DELETE',
-          `${apiBase}/v1/apps/${encodeURIComponent(id)}`,
+          `${apiBase}/v1/apps/${encodeURIComponent(id)}?mode=hard`,
           { Authorization: `Bearer ${ownerToken}`, ...SYNTHETIC_HEADERS }
         )
         cleaned += 1
@@ -334,7 +340,7 @@ async function deleteOrphansV2(
   for (let page = 0; page < 5; page++) {
     const list = await httpJson(
       'GET',
-      `${apiBase}/v2/apps?limit=${limit}&offset=${offset}&orderBy=displayName&order=asc`,
+      `${apiBase}/v2/apps?limit=${limit}&offset=${offset}&orderBy=displayName&order=asc&includeArchived=true`,
       { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS }
     )
     if (!list.resp.ok) break
@@ -348,7 +354,7 @@ async function deleteOrphansV2(
       try {
         await httpJson(
           'DELETE',
-          `${apiBase}/v2/apps/${encodeURIComponent(id)}`,
+          `${apiBase}/v2/apps/${encodeURIComponent(id)}?mode=hard`,
           { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS }
         )
         cleaned += 1
@@ -1317,7 +1323,7 @@ export async function runJourney(env: JourneyEnv, opts?: JourneyOptions): Promis
         step('cleanup_delete_app')
         const r = await httpJson(
           'DELETE',
-          `${env.ethoraApiBase}/v1/apps/${encodeURIComponent(String(syntheticApp.appId))}`,
+          `${env.ethoraApiBase}/v1/apps/${encodeURIComponent(String(syntheticApp.appId))}?mode=hard`,
           { Authorization: `Bearer ${ownerUserToken}`, ...SYNTHETIC_HEADERS }
         )
         if (!r.resp.ok) cleanupErr('delete_app', new Error(`status=${r.resp.status} ${r.text}`))
@@ -1674,7 +1680,7 @@ async function runJourneyB2B(env: JourneyEnv, opts?: JourneyOptions): Promise<Jo
     step('delete_app_v2')
     const deleteAppResp = await httpJson(
       'DELETE',
-      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}`,
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}?mode=hard`,
       { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS }
     )
     if (!deleteAppResp.resp.ok) throw new Error(`delete app failed: ${deleteAppResp.resp.status} ${deleteAppResp.text}`)
@@ -1735,7 +1741,7 @@ async function runJourneyB2B(env: JourneyEnv, opts?: JourneyOptions): Promise<Jo
         step('cleanup_delete_app_v2')
         const r = await httpJson(
           'DELETE',
-          `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}`,
+          `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}?mode=hard`,
           { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS }
         )
         if (!r.resp.ok) cleanupErr('delete_app_v2', new Error(`status=${r.resp.status} ${r.text}`))
@@ -1872,7 +1878,7 @@ async function runJourneyAI(env: JourneyEnv): Promise<JourneyResult> {
     step('delete_app_v2')
     const deleteAppResp = await httpJson(
       'DELETE',
-      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}`,
+      `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}?mode=hard`,
       { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS }
     )
     if (!deleteAppResp.resp.ok) throw new Error(`delete app failed: ${deleteAppResp.resp.status} ${deleteAppResp.text}`)
@@ -1895,7 +1901,7 @@ async function runJourneyAI(env: JourneyEnv): Promise<JourneyResult> {
         step('cleanup_delete_app_v2')
         const r = await httpJson(
           'DELETE',
-          `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}`,
+          `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}?mode=hard`,
           { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS }
         )
         if (!r.resp.ok) cleanupErr('delete_app_v2', new Error(`status=${r.resp.status} ${r.text}`))
@@ -2420,7 +2426,7 @@ async function runJourneyAdvanced(env: JourneyEnv, opts?: JourneyOptions): Promi
         step('cleanup_delete_app')
         const r = await httpJson(
           'DELETE',
-          `${env.ethoraApiBase}/v1/apps/${encodeURIComponent(String(syntheticApp.appId))}`,
+          `${env.ethoraApiBase}/v1/apps/${encodeURIComponent(String(syntheticApp.appId))}?mode=hard`,
           { Authorization: `Bearer ${ownerUserToken}`, ...SYNTHETIC_HEADERS }
         )
         if (!r.resp.ok) cleanupErr('delete_app', new Error(`status=${r.resp.status} ${r.text}`))

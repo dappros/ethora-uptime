@@ -100,7 +100,7 @@ async function setupSharedApp(env: JourneyEnv, displayName: string): Promise<Sha
 async function teardownSharedApp(env: JourneyEnv, ctx: SharedAppContext): Promise<void> {
    await httpJson(
       'DELETE',
-      `${env.ethoraApiBase}/v1/apps/${encodeURIComponent(ctx.appId)}`,
+      `${env.ethoraApiBase}/v1/apps/${encodeURIComponent(ctx.appId)}?mode=hard`,
       { Authorization: `Bearer ${ctx.ownerToken}`, ...SYNTHETIC_HEADERS },
    )
 }

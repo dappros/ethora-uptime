@@ -124,7 +124,7 @@ export async function runSharedB2B(opts: SharedB2BOptions): Promise<LoadRunResul
       try {
          await httpJson(
             'DELETE',
-            `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(app.appId)}`,
+            `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(app.appId)}?mode=hard`,
             { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS },
          )
       } catch {
