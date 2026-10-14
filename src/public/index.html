@@ -552,7 +552,7 @@
       }
 
       // Render a Local + _Public pair as a single card with two clearly-labelled
-      // sections ("Internal" and "External (TLS / DNS / Nginx)"). Operators
+      // sections ("Internal" and "External (TLS / DNS / reverse proxy)"). Operators
       // care about a single Ethora install as a unit, not as two cards that
       // happen to share a name prefix. The combined card also makes it
       // immediately obvious when internal and external diverge (which is the
@@ -627,8 +627,8 @@
           </div>
           ${promotedButtons}
           ${divergeBanner}
-          ${sectionFor(localInst, 'Internal (uptime container → host stack)')}
-          ${sectionFor(publicInst, 'External (https → TLS → Nginx)')}
+          ${sectionFor(localInst, 'Internal (uptime container → services)')}
+          ${sectionFor(publicInst, 'External (https → TLS → proxy)')}
         `;
         return card;
       }

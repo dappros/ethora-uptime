@@ -140,7 +140,7 @@ async function setupXmpp(env: JourneyEnv, suffix: string, poolSize: number): Pro
 }
 
 async function teardownXmpp(env: JourneyEnv, ctx: XmppContext): Promise<void> {
-   await httpJson('DELETE', `${env.ethoraApiBase}/v1/apps/${encodeURIComponent(ctx.appId)}`, {
+   await httpJson('DELETE', `${env.ethoraApiBase}/v1/apps/${encodeURIComponent(ctx.appId)}?mode=hard`, {
       Authorization: `Bearer ${ctx.ownerToken}`,
       'x-ethora-synthetic': '1',
    })

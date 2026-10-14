@@ -67,7 +67,7 @@ The deploy template defines two instance types:
 | Instance | Name suffix | What it checks |
 |----------|-------------|----------------|
 | **local** | (base name, e.g. "Astro Test") | Internal connectivity: uptime container → host services via `host.docker.internal` (API, MinIO) and → XMPP container via `xmpp:5280`. Use this to verify the stack works from inside Docker. |
-| **public** | `_Public` (e.g. "Astro Test_Public") | External connectivity: internet → your server via public URLs (`https://api...`, `https://xmpp...`). Use this to verify TLS, Nginx, and DNS. |
+| **public** | `_Public` (e.g. "Astro Test_Public") | External connectivity: internet → your server via public URLs (`https://api...`, `https://xmpp...`). Use this to verify TLS, the reverse proxy (Nginx on host installs, Caddy in the compose bundle) and DNS. |
 
 - **Local red, Public green**: The uptime container cannot reach host services (e.g. `host.docker.internal` not resolving on Linux, or backend not listening). External access works.
 - **Local green, Public red**: Internal stack is fine; external access is broken (DNS, firewall, SSL).
