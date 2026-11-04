@@ -67,6 +67,9 @@ RUN npm run build \
 FROM node:20-bookworm-slim AS run
 # `upgrade` picks up Debian security fixes published after the base image was
 # built (the release workflow blocks on fixable CRITICAL CVEs).
+# Set to the build date by CI (release-images), so the upgrade below runs
+# again each day instead of coming back from an old layer cache.
+ARG SECURITY_UPGRADE_DATE=""
 RUN apt-get update \
  && apt-get upgrade -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/* \
