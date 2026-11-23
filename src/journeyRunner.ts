@@ -1750,8 +1750,66 @@ async function runJourneyB2B(env: JourneyEnv, opts?: JourneyOptions): Promise<Jo
   }
 }
 
+// Knowledge steps of the AI journey. Waiting for the index is bounded by these;
+// the journey's own timeoutMs in uptime.yml has to leave room for both.
+const AI_INDEX_TIMEOUT_MS = Number(process.env.ETHORA_JOURNEY_AI_INDEX_TIMEOUT_MS || 60000)
+const AI_CRAWL_TIMEOUT_MS = Number(process.env.ETHORA_JOURNEY_AI_CRAWL_TIMEOUT_MS || 90000)
+const AI_POLL_MS = 3000
+const CRAWL_TERMINAL = new Set(['completed', 'failed', 'cancelled'])
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+type KnowledgeHealth = {
+  pages?: number
+  docs?: number
+  chunks?: number | null
+  indexAvailable?: boolean
+  missing?: { pages?: number; docs?: number; examples?: string[] }
+}
+
+// Polls GET /v2/agents/:id/knowledge (what Agent Settings reads) until `done`
+// holds or the time runs out. Any non-2xx is a failure: a 403 here is the
+// "uploads never show" regression. `indexAvailable: false` means the API could
+// not ask the ai-service for chunk counts, so whether something is indexed
+// cannot be told; the caller decides what that means.
+async function waitForKnowledge(
+  env: JourneyEnv,
+  token: string,
+  agentId: string,
+  done: (k: KnowledgeHealth) => boolean,
+  timeoutMs: number
+): Promise<{ reached: boolean; last: KnowledgeHealth; waitedMs: number }> {
+  const started = Date.now()
+  let last: KnowledgeHealth = {}
+  for (;;) {
+    const r = await httpJson(
+      'GET',
+      `${env.ethoraApiBase}/v2/agents/${encodeURIComponent(agentId)}/knowledge`,
+      { Authorization: `Bearer ${token}`, ...SYNTHETIC_HEADERS }
+    )
+    if (!r.resp.ok) throw new Error(`agent knowledge failed: ${r.resp.status} ${r.text}`)
+    last = (r.json || {}) as KnowledgeHealth
+    const waitedMs = Date.now() - started
+    if (done(last)) return { reached: true, last, waitedMs }
+    if (waitedMs + AI_POLL_MS > timeoutMs) return { reached: false, last, waitedMs }
+    await sleep(AI_POLL_MS)
+  }
+}
+
+function knowledgeSummary(k: KnowledgeHealth) {
+  return {
+    pages: k.pages ?? null,
+    docs: k.docs ?? null,
+    chunks: k.chunks ?? null,
+    indexAvailable: k.indexAvailable ?? null,
+    missingPages: k.missing?.pages ?? null,
+    missingDocs: k.missing?.docs ?? null,
+  }
+}
+
 // Opt-in AI journey — exercises the Agents API forward path (create agent →
-// list → invite into a room → inspect bot-instances). Only meaningful where the
+// list → save → upload a document and wait for it in the index → optional
+// one-page crawl → invite into a room → inspect bot-instances). Only meaningful where the
 // AI module is enabled at deploy-config level; enable this journey per-deploy
 // (checkId `<instance>:journey_ai`). Steps that depend on the ai-service are
 // best-effort: a 5xx is recorded as a skip rather than a hard failure, so a
@@ -1824,6 +1882,125 @@ async function runJourneyAI(env: JourneyEnv): Promise<JourneyResult> {
       const items = Array.isArray(listAgentsResp.json?.items) ? listAgentsResp.json.items : []
       if (!items.some((a: any) => String(a?.id || '') === createdAgentId)) {
         throw new Error('created agent not found in app agents list')
+      }
+    }
+
+    if (createdAgentId) {
+      // 2a) Save the agent the way Agent Settings does (PUT) and read it back.
+      step('save_agent_v2')
+      const savedBio = `uptime synthetic agent, saved ${suffix}`
+      const saveResp = await httpJson(
+        'PUT',
+        `${env.ethoraApiBase}/v2/agents/${encodeURIComponent(createdAgentId)}`,
+        { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS },
+        { bio: savedBio }
+      )
+      if (!saveResp.resp.ok) throw new Error(`save agent failed: ${saveResp.resp.status} ${saveResp.text}`)
+      const getResp = await httpJson(
+        'GET',
+        `${env.ethoraApiBase}/v2/agents/${encodeURIComponent(createdAgentId)}`,
+        { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS }
+      )
+      if (!getResp.resp.ok) throw new Error(`get agent failed: ${getResp.resp.status} ${getResp.text}`)
+      if (String(getResp.json?.agent?.bio || '') !== savedBio) throw new Error('saved agent: bio did not persist')
+
+      // 2b) Upload a small document for the agent. The API parses it right
+      // away (docs-parse) and indexes it in the background (ai-service), so
+      // the document must show in the agent's knowledge at once and become
+      // searchable within AI_INDEX_TIMEOUT_MS.
+      step('upload_agent_doc_v2')
+      const form = new FormData()
+      const docName = `uptime-${suffix}.txt`
+      form.append('files', new Blob([`Uptime synthetic document ${suffix}. The uptime check code word is ${suffix}.`], { type: 'text/plain' }), docName)
+      form.append('agentId', createdAgentId)
+      const uploadResp = await fetch(`${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/sources/docs`, {
+        method: 'POST',
+        headers: { ...SYNTHETIC_HEADERS, Authorization: `Bearer ${parentServerToken}` },
+        body: form,
+      })
+      const uploadText = await uploadResp.text()
+      if (uploadResp.status === 501) {
+        // AI_DISABLED: the server runs without AI features; nothing to index.
+        step('upload_agent_doc_v2_skipped', { status: 501 })
+      } else {
+        if (!uploadResp.ok) throw new Error(`agent document upload failed: ${uploadResp.status} ${uploadText}`)
+
+        step('agent_doc_listed_v2')
+        const listed = await waitForKnowledge(env, parentServerToken, createdAgentId, (k) => (k.docs || 0) >= 1, 0)
+        if (!listed.reached) throw new Error(`uploaded document missing from agent knowledge: ${JSON.stringify(knowledgeSummary(listed.last))}`)
+
+        step('agent_doc_indexed_v2')
+        const indexed = await waitForKnowledge(
+          env, parentServerToken, createdAgentId,
+          (k) => k.indexAvailable === true && (k.docs || 0) >= 1 && (k.missing?.docs ?? 1) === 0,
+          AI_INDEX_TIMEOUT_MS
+        )
+        details.knowledgeAfterUpload = { ...knowledgeSummary(indexed.last), waitedMs: indexed.waitedMs }
+        if (!indexed.reached) {
+          if (indexed.last.indexAvailable !== true) {
+            // The API could not reach the ai-service for counts: a dependency
+            // blip, not a lost document. Same rule as the other AI steps.
+            step('agent_doc_indexed_v2_skipped', { reason: 'index_unavailable' })
+          } else {
+            throw new Error(`uploaded document not indexed within ${AI_INDEX_TIMEOUT_MS} ms: ${JSON.stringify(knowledgeSummary(indexed.last))}`)
+          }
+        }
+      }
+
+      // 2c) Crawl one page for the agent. Needs a public URL the crawler can
+      // reach, so it only runs when ETHORA_JOURNEY_AI_CRAWL_URL is set.
+      const crawlUrl = String(process.env.ETHORA_JOURNEY_AI_CRAWL_URL || '').trim()
+      if (!crawlUrl) {
+        step('crawl_agent_page_v2_skipped', { reason: 'no_crawl_url' })
+      } else {
+        step('crawl_agent_page_v2', { url: crawlUrl })
+        const crawlResp = await httpJson(
+          'POST',
+          `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/sources/site-crawl`,
+          { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS },
+          { url: crawlUrl, followLink: false, force: true, agentId: createdAgentId }
+        )
+        if (crawlResp.resp.status === 501) {
+          step('crawl_agent_page_v2_skipped', { status: 501 })
+        } else {
+          if (!crawlResp.resp.ok) throw new Error(`crawl start failed: ${crawlResp.resp.status} ${crawlResp.text}`)
+          const jobId = String(crawlResp.json?.jobId || crawlResp.json?.result?.jobId || '').trim()
+          if (!jobId) throw new Error(`crawl start: no jobId in ${crawlResp.text}`)
+
+          step('crawl_agent_page_job_v2', { jobId })
+          const deadline = Date.now() + AI_CRAWL_TIMEOUT_MS
+          let job: any = null
+          for (;;) {
+            const jr = await httpJson(
+              'GET',
+              `${env.ethoraApiBase}/v2/apps/${encodeURIComponent(createdAppId)}/sources/site-crawl-jobs/${encodeURIComponent(jobId)}`,
+              { Authorization: `Bearer ${parentServerToken}`, ...SYNTHETIC_HEADERS }
+            )
+            if (!jr.resp.ok) throw new Error(`crawl job status failed: ${jr.resp.status} ${jr.text}`)
+            job = jr.json?.result || {}
+            if (CRAWL_TERMINAL.has(String(job.status))) break
+            if (Date.now() + AI_POLL_MS > deadline) break
+            await sleep(AI_POLL_MS)
+          }
+          details.crawlJob = { jobId, status: job?.status ?? null, savedPages: job?.savedPages ?? null, error: job?.error ?? null }
+          if (job?.status !== 'completed') {
+            throw new Error(`crawl did not complete within ${AI_CRAWL_TIMEOUT_MS} ms: ${JSON.stringify(details.crawlJob)}`)
+          }
+          if (!(Number(job.savedPages) >= 1)) throw new Error(`crawl completed with no saved page: ${JSON.stringify(details.crawlJob)}`)
+
+          step('crawl_agent_page_indexed_v2')
+          const pages = await waitForKnowledge(
+            env, parentServerToken, createdAgentId,
+            (k) => k.indexAvailable === true && (k.pages || 0) >= 1 && (k.missing?.pages ?? 1) === 0,
+            AI_INDEX_TIMEOUT_MS
+          )
+          details.knowledgeAfterCrawl = { ...knowledgeSummary(pages.last), waitedMs: pages.waitedMs }
+          if (!pages.reached) {
+            if ((pages.last.pages || 0) < 1) throw new Error(`crawled page missing from agent knowledge: ${JSON.stringify(knowledgeSummary(pages.last))}`)
+            if (pages.last.indexAvailable !== true) step('crawl_agent_page_indexed_v2_skipped', { reason: 'index_unavailable' })
+            else throw new Error(`crawled page not indexed within ${AI_INDEX_TIMEOUT_MS} ms: ${JSON.stringify(knowledgeSummary(pages.last))}`)
+          }
+        }
       }
     }
 
